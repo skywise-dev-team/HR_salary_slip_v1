@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
+
+const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 const ACTION_LABELS = {
   LOGIN: 'Login',
@@ -21,6 +24,8 @@ export default function ActivityLog() {
   const [filterOptions, setFilterOptions] = useState({ performedBy: [], roleNames: [], actions: [] });
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
 
   const load = () => {
     setLoading(true);
@@ -34,7 +39,9 @@ export default function ActivityLog() {
     api.get('/api/activity-log/filters').then(({ data }) => setFilterOptions(data));
   }, []);
 
-  useEffect(load, [filters]);
+  useEffect(() => { load(); setPage(1); }, [filters]);
+
+  const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
   const moduleLabel = (key) => modules.find((m) => m.key === key)?.label || key;
   const clearFilters = () => setFilters(EMPTY_FILTERS);
@@ -103,7 +110,7 @@ export default function ActivityLog() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {pagedRows.map((r) => (
               <tr key={r.id}>
                 <td className="nowrap">{new Date(r.created_at).toLocaleString()}</td>
                 <td>{r.performed_by}</td>
@@ -118,9 +125,10 @@ export default function ActivityLog() {
             )}
           </tbody>
         </table>
-        {rows.length === 1000 && (
+        <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={rows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
+        {rows.length === 5000 && (
           <div className="muted small" style={{ padding: '8px 4px' }}>
-            Showing the 1000 most recent matching entries. Narrow the filters above to see older activity.
+            Showing the 5000 most recent matching entries. Narrow the filters above to see older activity.
           </div>
         )}
       </div>

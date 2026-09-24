@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useImportSlot } from '../context/ImportContext.jsx';
@@ -17,6 +18,8 @@ const EMPTY = {
   paid_days: '', basic: '', hra: '', da: '', conveyance_allowance: '', overtime: '',
   pf_deduction: '', esi_deduction: '', pt_deduction: '', tds_deduction: '', other_deduction: ''
 };
+
+const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 export default function UploadSalaryData() {
   const [rows, setRows] = useState([]);
@@ -35,6 +38,10 @@ export default function UploadSalaryData() {
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const [groupEmployees, setGroupEmployees] = useState({});
   const [groupSearch, setGroupSearch] = useState({});
+  const [groupPage, setGroupPage] = useState({});
+  const [groupPageSize, setGroupPageSize] = useState({});
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const { showToast } = useToast();
 
   const load = () => {
@@ -42,6 +49,8 @@ export default function UploadSalaryData() {
     Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
     api.get('/api/salary-data/summary', { params }).then(({ data }) => { setRows(data); setSelectedGroups([]); });
   };
+
+  const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
   const groupKey = (r) => `${r.establishment_id}-${r.period_month}-${r.period_year}`;
   const toggleGroup = (key) => {
@@ -132,6 +141,7 @@ export default function UploadSalaryData() {
   useEffect(() => {
     if (syncing) return;
     load();
+    setPage(1);
   }, [filters, syncing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openAdd = () => { setForm(EMPTY); setError(''); setModalOpen(true); };
@@ -282,7 +292,7 @@ export default function UploadSalaryData() {
             </tr>
           </thead>
           <tbody>
-            {rows.flatMap((r) => {
+            {pagedRows.flatMap((r) => {
               const key = groupKey(r);
               const isOpen = expandedGroups.has(key);
               const search = (groupSearch[key] || '').trim().toLowerCase();
@@ -290,6 +300,9 @@ export default function UploadSalaryData() {
               const visibleEmployees = employees && search
                 ? employees.filter((e) => e.full_name.toLowerCase().includes(search) || e.emp_code.toLowerCase().includes(search))
                 : employees;
+              const gPage = groupPage[key] || 1;
+              const gPageSize = groupPageSize[key] || PAGE_SIZE_OPTIONS[0];
+              const pagedEmployees = visibleEmployees ? visibleEmployees.slice((gPage - 1) * gPageSize, gPage * gPageSize) : visibleEmployees;
 
               const groupRows = [
                 <tr key={key}>
@@ -317,7 +330,7 @@ export default function UploadSalaryData() {
                             <SearchAutocomplete
                               placeholder="Employee name or ID"
                               value={groupSearch[key] || ''}
-                              onChange={(v) => setGroupSearch({ ...groupSearch, [key]: v })}
+                              onChange={(v) => { setGroupSearch({ ...groupSearch, [key]: v }); setGroupPage({ ...groupPage, [key]: 1 }); }}
                               options={employees}
                               getLabel={(e) => `${e.full_name} (${e.emp_code})`}
                               getValue={(e) => e.emp_code}
@@ -330,7 +343,7 @@ export default function UploadSalaryData() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {visibleEmployees.map((e) => (
+                                {pagedEmployees.map((e) => (
                                   <tr key={e.id}>
                                     <td>{e.full_name} <span className="muted small">({e.emp_code})</span></td>
                                     <td>{formatINR(e.net_pay)}</td>
@@ -344,6 +357,14 @@ export default function UploadSalaryData() {
                                 )}
                               </tbody>
                             </table>
+                            <Pagination
+                              page={gPage}
+                              setPage={(p) => setGroupPage({ ...groupPage, [key]: p })}
+                              pageSize={gPageSize}
+                              setPageSize={(s) => setGroupPageSize({ ...groupPageSize, [key]: s })}
+                              totalItems={visibleEmployees.length}
+                              pageSizeOptions={PAGE_SIZE_OPTIONS}
+                            />
                           </>
                         )}
                       </div>
@@ -356,6 +377,7 @@ export default function UploadSalaryData() {
             {!rows.length && <tr><td colSpan={7} className="muted">No salary data yet.</td></tr>}
           </tbody>
         </table>
+        <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={rows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
       </div>
 
       {modalOpen && (

@@ -35,15 +35,19 @@ function buildFilters(query) {
 // Filterable by staff member (by their login ID, matched against the
 // snapshot taken at the time — still works even if that account has since
 // been deleted), role, action type, module, and a date range. Capped at the
-// 1000 most recent matching rows — this table has no natural cap on size
-// the way most others in the app do (one row per action, indefinitely), so
-// a hard limit keeps a very broad/unfiltered query from ever returning an
-// unbounded result set on screen.
+// 5000 most recent matching rows — this table has no natural cap on size
+// the way most others in the app do (one row per action, indefinitely, on
+// top of the automatic 6-month retention cleanup), so a hard limit keeps a
+// truly unfiltered query on a very long-running install from ever returning
+// an unbounded payload. Pagination on the frontend slices this same
+// already-fetched set into pages — search and filters here always cover
+// everything actually returned by this cap, not just whichever page is on
+// screen.
 router.get('/', requirePermission('activity_log', 'view'), async (req, res) => {
   const { where, params } = buildFilters(req.query);
   const [rows] = await pool.query(
     `SELECT id, performed_by, role_name, action, module_key, description, created_at
-     FROM activity_log ${where} ORDER BY created_at DESC LIMIT 1000`,
+     FROM activity_log ${where} ORDER BY created_at DESC LIMIT 5000`,
     params
   );
   res.json(rows);
