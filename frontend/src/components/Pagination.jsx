@@ -24,9 +24,8 @@ export default function Pagination({ page, setPage, pageSize, setPageSize, total
 
   return (
     <div className="pagination-bar">
-      <div className="pagination-info">Showing {startItem}-{endItem} of {totalItems}</div>
       <div className="pagination-controls">
-        <button className="pagination-nav-btn" disabled={clampedPage <= 1} onClick={() => setPage(clampedPage - 1)}>Prev</button>
+        <button className="pagination-nav-link" disabled={clampedPage <= 1} onClick={() => setPage(clampedPage - 1)}>&laquo; Previous</button>
         {pages.map((p, i) => (
           <span key={p} style={{ display: 'flex', alignItems: 'center' }}>
             {i > 0 && p - pages[i - 1] > 1 && <span className="pagination-ellipsis">…</span>}
@@ -38,8 +37,9 @@ export default function Pagination({ page, setPage, pageSize, setPageSize, total
             </button>
           </span>
         ))}
-        <button className="pagination-nav-btn" disabled={clampedPage >= totalPages} onClick={() => setPage(clampedPage + 1)}>Next</button>
+        <button className="pagination-nav-link" disabled={clampedPage >= totalPages} onClick={() => setPage(clampedPage + 1)}>Next &raquo;</button>
       </div>
+      <div className="pagination-info">Showing {startItem}-{endItem} of {totalItems}</div>
       {pageSizeOptions && (
         <select
           className="pagination-size-select"

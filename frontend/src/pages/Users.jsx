@@ -4,6 +4,7 @@ import Modal from '../components/Modal.jsx';
 import PasswordInput from '../components/PasswordInput.jsx';
 import { Toggle, StatusBadge } from '../components/Toggle.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -12,6 +13,7 @@ import { streamImport } from '../utils/importProgress.js';
 import { showResultToast } from '../utils/approvalToast.js';
 
 const EMPTY = { user_id: '', password: '', email: '', role_id: '', can_approve: false };
+const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 export default function Users() {
   const [rows, setRows] = useState([]);
@@ -29,9 +31,12 @@ export default function Users() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkRoleId, setBulkRoleId] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
 
   const load = () => api.get('/api/users').then(({ data }) => setRows(data));
   useEffect(() => { load(); api.get('/api/roles').then(({ data }) => setRoles(data)); }, []);
+  useEffect(() => { setPage(1); }, [search]);
 
   const openAdd = () => { setEditing(null); setForm(EMPTY); setError(''); setModalOpen(true); };
   const openEdit = (row) => { setEditing(row); setForm({ ...row, password: '' }); setError(''); setModalOpen(true); };
@@ -144,6 +149,7 @@ export default function Users() {
   const toggleOne = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const allSelected = filteredRows.length > 0 && filteredRows.every((r) => selectedIds.includes(r.id));
   const toggleAll = () => setSelectedIds(allSelected ? [] : filteredRows.map((r) => r.id));
+  const pagedRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
 
   const bulkSetStatus = async (status) => {
     if (!selectedIds.length) return;
@@ -272,7 +278,7 @@ export default function Users() {
             </tr>
           </thead>
           <tbody>
-            {filteredRows.map((r) => (
+            {pagedRows.map((r) => (
               <tr key={r.id}>
                 <td><input type="checkbox" checked={selectedIds.includes(r.id)} onChange={() => toggleOne(r.id)} /></td>
                 <td>{r.user_id}</td>
@@ -295,6 +301,7 @@ export default function Users() {
             {!filteredRows.length && <tr><td colSpan={6} className="muted">{search ? 'No matching users.' : 'No users yet.'}</td></tr>}
           </tbody>
         </table>
+        <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={filteredRows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
       </div>
 
       {modalOpen && (

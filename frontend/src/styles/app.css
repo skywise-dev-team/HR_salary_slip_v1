@@ -285,3 +285,24 @@ body { margin: 0; font-family: 'Segoe UI', Roboto, Arial, sans-serif; background
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   padding: 10px; font-size: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap;
 }
+
+.pagination-bar {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);
+}
+.pagination-info { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.pagination-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pagination-nav-link {
+  border: none; background: none; color: var(--primary, #1a73e8);
+  font-size: 14px; cursor: pointer; padding: 4px 2px;
+}
+.pagination-nav-link:disabled { color: var(--muted); opacity: 0.6; cursor: default; }
+.pagination-nav-link:not(:disabled):hover { text-decoration: underline; }
+.pagination-page-btn {
+  border: none; background: none; border-radius: 4px;
+  padding: 4px 9px; font-size: 14px; cursor: pointer; min-width: 28px; color: inherit;
+}
+.pagination-page-btn:not(.active):hover { text-decoration: underline; }
+.pagination-page-btn.active { background: var(--primary, #1a73e8); color: #fff; font-weight: 600; cursor: default; }
+.pagination-ellipsis { padding: 0 4px; color: var(--muted); }
+.pagination-size-select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }

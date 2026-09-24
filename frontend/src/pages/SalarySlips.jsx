@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
 import YearPicker from '../components/YearPicker.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { formatINR } from '../utils/formatCurrency.js';
@@ -10,6 +11,7 @@ const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 export default function SalarySlips() {
   const { user, can, refreshUser } = useAuth();
@@ -80,6 +82,8 @@ export default function SalarySlips() {
   const [searched, setSearched] = useState(false);
   const [previewSlip, setPreviewSlip] = useState(null);
   const [selectedIds, setSelectedIds] = useState([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
 
   // View-only roles pick a period first; results only load once both are set.
   const periodReady = !canManage ? !!(filters.month && filters.year) : true;
@@ -103,6 +107,7 @@ export default function SalarySlips() {
     loadSlips();
     setPreviewSlip(null);
     setSelectedIds([]);
+    setPage(1);
   }, [filters, canManage, syncing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const download = (slip, e) => {
@@ -135,6 +140,7 @@ export default function SalarySlips() {
 
   const allSelected = slips.length > 0 && selectedIds.length === slips.length;
   const toggleAll = () => setSelectedIds(allSelected ? [] : slips.map((s) => s.id));
+  const pagedSlips = slips.slice((page - 1) * pageSize, page * pageSize);
 
   const token = localStorage.getItem('token');
   const previewUrl = previewSlip
@@ -234,7 +240,7 @@ export default function SalarySlips() {
               </tr>
             </thead>
             <tbody>
-              {slips.flatMap((s) => {
+              {pagedSlips.flatMap((s) => {
                 const rows = [
                   <tr
                     key={s.id}
@@ -296,6 +302,7 @@ export default function SalarySlips() {
               )}
             </tbody>
           </table>
+          <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={slips.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
         </div>
       )}
     </Layout>

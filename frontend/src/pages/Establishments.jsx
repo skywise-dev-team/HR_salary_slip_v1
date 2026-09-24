@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 
 const EMPTY = { est_code: '', name: '', signatory_name: '', address: '' };
 const MAX_LOGO_SIGNATURE_MB = 5;
+const PAGE_SIZE_OPTIONS = [10, 25, 50];
 
 export default function Establishments() {
   const [rows, setRows] = useState([]);
@@ -14,10 +16,14 @@ export default function Establishments() {
   const [form, setForm] = useState(EMPTY);
   const [files, setFiles] = useState({});
   const [error, setError] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const { showToast } = useToast();
 
   const load = () => api.get('/api/establishments').then(({ data }) => setRows(data));
   useEffect(() => { load(); }, []);
+
+  const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
   const openAdd = () => { setEditing(null); setForm(EMPTY); setFiles({}); setError(''); setModalOpen(true); };
   const openEdit = (row) => { setEditing(row); setForm(row); setFiles({}); setError(''); setModalOpen(true); };
@@ -74,7 +80,7 @@ export default function Establishments() {
             <tr><th>Code</th><th>Name</th><th>Signatory</th><th>Address</th><th>Actions</th></tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {pagedRows.map((r) => (
               <tr key={r.id}>
                 <td>{r.est_code}</td>
                 <td>{r.name}</td>
@@ -89,6 +95,7 @@ export default function Establishments() {
             {!rows.length && <tr><td colSpan={5} className="muted">No establishments yet.</td></tr>}
           </tbody>
         </table>
+        <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={rows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
       </div>
 
       {modalOpen && (

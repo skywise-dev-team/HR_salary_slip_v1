@@ -3,6 +3,7 @@ import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import { Toggle, StatusBadge } from '../components/Toggle.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
+import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -22,6 +23,8 @@ const SALARY_ACCESS_LABELS = {
   NO_ACCESS: 'No access'
 };
 
+const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
+
 export default function EmployeeMaster() {
   const [rows, setRows] = useState([]);
   const [allEmployees, setAllEmployees] = useState([]); // unfiltered, for search suggestions
@@ -39,6 +42,8 @@ export default function EmployeeMaster() {
   const { importing, progress: importProgress, result: importResult, startImport, updateProgress, finishImport, cancelImport } = useImportSlot('employees');
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const { showToast } = useToast();
   const { isAdmin } = useAuth();
 
@@ -54,7 +59,12 @@ export default function EmployeeMaster() {
     api.get('/api/establishments').then(({ data }) => setEstablishments(data));
     api.get('/api/employees').then(({ data }) => setAllEmployees(data));
   }, []);
-  useEffect(() => { load(); }, [search, estFilter, statusFilter]);
+  // Whenever the underlying filtered set changes, jump back to page 1 —
+  // otherwise a narrower search could leave the view stranded on a page
+  // number that no longer has any rows on it.
+  useEffect(() => { load(); setPage(1); }, [search, estFilter, statusFilter]);
+
+  const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
   const refreshAllEmployees = () => api.get('/api/employees').then(({ data }) => setAllEmployees(data));
 
@@ -311,7 +321,7 @@ export default function EmployeeMaster() {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {pagedRows.map((r) => (
               <tr key={r.id}>
                 <td><input type="checkbox" checked={selectedIds.includes(r.id)} onChange={() => toggleOne(r.id)} /></td>
                 <td>{r.employee_id}</td>
@@ -351,7 +361,7 @@ export default function EmployeeMaster() {
             {!rows.length && <tr><td colSpan={9} className="muted">No employees found.</td></tr>}
           </tbody>
         </table>
-        <div className="muted small" style={{ padding: '8px 4px' }}>Showing 1-{rows.length} of {rows.length}</div>
+        <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={rows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
       </div>
 
       {modalOpen && (
