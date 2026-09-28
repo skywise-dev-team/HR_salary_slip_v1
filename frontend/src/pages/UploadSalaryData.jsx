@@ -9,6 +9,7 @@ import { useImportSlot } from '../context/ImportContext.jsx';
 import { formatINR } from '../utils/formatCurrency.js';
 import { streamImport } from '../utils/importProgress.js';
 import { showResultToast } from '../utils/approvalToast.js';
+import { API_BASE } from '../config/apiBase.js';
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -212,7 +213,7 @@ export default function UploadSalaryData() {
 
   const downloadTemplate = () => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     window.open(`${base}/api/salary-data/template?token=${token}`, '_blank');
   };
 

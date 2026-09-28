@@ -1,4 +1,4 @@
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -19,8 +19,23 @@ const { MAX_LOGO_SIGNATURE_SIZE } = require('./middleware/upload');
 const cron = require('node-cron');
 const { runRetentionCleanup } = require('./utils/retentionCleanup');
 const { expireStaleApprovalRequests } = require('./utils/approvals');
+const { logNetworkRestrictionStatus } = require('./utils/networkAccess');
 
 const app = express();
+
+// If this app sits behind a reverse proxy (nginx, a load balancer, a
+// hosting platform's router), the address Express sees on each request is
+// the PROXY's, not the visitor's — which would make the staff network
+// restriction see every visitor as the same address. TRUST_PROXY tells
+// Express how many proxy hops in front of it to believe when reading the
+// real visitor address from X-Forwarded-For: 1 for a single proxy such as
+// nginx. Leave it unset when visitors connect to this app directly —
+// trusting that header without a real proxy in front would let anyone fake
+// their address, so it's never on by default.
+const trustProxy = (process.env.TRUST_PROXY || '').trim();
+if (trustProxy && trustProxy !== '0' && trustProxy.toLowerCase() !== 'false') {
+  app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
 
 app.use(cors({ origin: (process.env.CORS_ORIGIN || '*').split(',') }));
 app.use(express.json());
@@ -60,7 +75,10 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Salary Slip System API running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Salary Slip System API running on port ${PORT}`);
+  logNetworkRestrictionStatus();
+});
 
 // Retention cleanup — runs once a day at 2 AM server time. Removes
 // activity_log entries older than 6 months. (Salary slip PDFs are never

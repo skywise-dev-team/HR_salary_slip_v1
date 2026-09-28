@@ -50,7 +50,7 @@ you deploy. **Salary slip PDFs are never stored here or anywhere else** — see
 ```
 cd frontend
 npm install
-# create frontend/.env with: VITE_API_BASE_URL=http://localhost:5000
+# optional: frontend/.env with VITE_API_BASE_URL=... (if omitted, see the note below)
 npm run dev              # http://localhost:5173
 ```
 
@@ -60,7 +60,13 @@ For production:
 npm run build            # outputs static files to frontend/dist
 ```
 
-Serve `frontend/dist` with any static host and point `VITE_API_BASE_URL` at your deployed backend.
+Serve `frontend/dist` with any static host. **Leave `VITE_API_BASE_URL` unset or empty for production** —
+the app then calls the API on the same host the page was opened from (port 5000), so the one build
+works for everybody: people who open it at the server's LAN address use the API over the LAN, and
+people who open it at the public address use it there. This also keeps office staff traffic on the
+LAN, so the server sees their real office addresses for the staff network restriction (see
+[Restricting staff to the office network](#restricting-staff-to-the-office-network)). Only set
+`VITE_API_BASE_URL` if the API runs on a different port or a different host than the page.
 
 ## 4. Application modules
 
@@ -132,6 +138,8 @@ to generate its slip at all) is done from Upload Salary Data.
 | `JWT_SECRET` | Secret used to sign login tokens — set a long random string |
 | `JWT_EXPIRES_IN` | Token lifetime (default `30m`) — every session is force-logged-out at this point, except while a bulk import is actively in progress for that account |
 | `CORS_ORIGIN` | Comma-separated list of allowed frontend origins |
+| `ALLOWED_STAFF_IPS` | Restricts **staff** accounts to the company network — see [Restricting staff to the office network](#restricting-staff-to-the-office-network). Unset = no restriction |
+| `TRUST_PROXY` | Number of reverse proxies in front of the API (e.g. `1` for nginx). Leave unset if visitors connect directly. Needed for the network restriction to see real visitor addresses behind a proxy |
 
 `SMTP_*` variables (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`,
 `SMTP_FROM_NAME`, `SMTP_ALLOW_ARBITRARY_FROM`) are recognized by `backend/src/utils/mailer.js`
@@ -143,7 +151,7 @@ wired back in later without rebuilding it, not because anything sends email toda
 
 | Variable | Purpose |
 |---|---|
-| `VITE_API_BASE_URL` | The backend's URL, e.g. `http://localhost:5000` |
+| `VITE_API_BASE_URL` | Optional. Pins the backend's URL (e.g. `http://localhost:5000`). If unset or empty, the app uses the same host the page was loaded from, on port 5000 |
 
 ## 6. Login system
 
@@ -161,6 +169,50 @@ Login is **case-sensitive** for both User ID and Employee ID (`HR1` and `hr1` ar
 accounts). Every session is force-logged-out after `JWT_EXPIRES_IN` (default 30 minutes) — except
 that a bulk Excel import already in progress for that account defers the logout until the import
 finishes, rather than interrupting it.
+
+### Restricting staff to the office network
+
+Staff accounts (the Users page — Admin, HR, and every other role) can be limited to the company
+network. **Employee self-service logins are never restricted** — an employee can still reach their
+own salary slips from anywhere.
+
+Set `ALLOWED_STAFF_IPS` in `backend/.env` to a comma-separated list of any mix of:
+
+```
+ALLOWED_STAFF_IPS=203.0.113.10                        # a single address
+ALLOWED_STAFF_IPS=192.168.1.0/24                      # a CIDR range
+ALLOWED_STAFF_IPS=10.0.0.5-10.0.0.50                  # an inclusive range
+ALLOWED_STAFF_IPS=203.0.113.10,192.168.1.0/24         # any combination (IPv6 works too)
+```
+
+Unset or empty means **no restriction**. Once set, a staff account is refused from every address not
+on the list — at login, and again on **every request** afterwards, so a session started in the office
+can't be carried home and kept using. The server prints `Staff network restriction: ON/OFF` at startup.
+
+What to put in the list depends on where the server runs:
+
+- **Server inside the office LAN, reached directly** — list the office's private range, e.g.
+  `192.168.1.0/24` (check with `ipconfig` on an office PC). Leave `TRUST_PROXY` unset.
+- **Server hosted elsewhere (cloud/VPS), reached over the internet** — list the office's **public**
+  IP (search "what is my IP" from an office PC). This must be a *static* IP: if your ISP changes it,
+  every staff login is locked out until the list is updated and the server restarted. If the API
+  sits behind nginx or similar, also set `TRUST_PROXY=1` — without it every visitor appears to come
+  from the proxy's own address.
+- **Local development** — either leave `ALLOWED_STAFF_IPS` unset, or include `127.0.0.1,::1`.
+  Loopback is deliberately never allowed automatically (behind a proxy on the same machine, that
+  would let everyone in).
+
+Good to know:
+- It restricts by **network address**, so it can't tell devices or people on the same network apart.
+  Anyone whose traffic leaves through the office address is allowed — including guests on a shared
+  Wi-Fi and anyone connected to the office VPN.
+- The **Super Admin account is restricted too** (no exemptions). If the list is ever wrong, fix
+  `ALLOWED_STAFF_IPS` in `backend/.env` and restart the server.
+- A refused staff user sees their current address in the message, which makes a wrong list or a
+  missing `TRUST_PROXY` easy to spot. The message only appears after a correct password, so an
+  outsider guessing passwords learns nothing about which accounts exist.
+- Entries that can't be parsed are skipped with a startup warning — that only ever makes the
+  restriction stricter. If *every* entry is invalid, the restriction stays on and nobody gets in.
 
 ## 7. Approval workflow
 

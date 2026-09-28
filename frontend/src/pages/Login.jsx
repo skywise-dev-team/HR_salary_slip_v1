@@ -7,7 +7,11 @@ import PasswordInput from '../components/PasswordInput.jsx';
 export default function Login() {
   const [userId, setUserId] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() =>
+    new URLSearchParams(window.location.search).get('reason') === 'network'
+      ? 'You have been signed out: staff accounts can only be used from the office network.'
+      : ''
+  );
   const [busy, setBusy] = useState(false);
   const [accountChoice, setAccountChoice] = useState(null); // set when the same ID has both a staff and an employee account
   const { login } = useAuth();

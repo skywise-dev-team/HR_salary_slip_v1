@@ -6,11 +6,11 @@ import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { formatINR } from '../utils/formatCurrency.js';
+import { API_BASE } from '../config/apiBase.js';
 
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 export default function SalarySlips() {

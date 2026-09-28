@@ -5,13 +5,20 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { requireAuth, getPermissionsMap, ensureEmployeeRole } = require('../middleware/auth');
 const { logActivity, logLogin } = require('../utils/activityLog');
+const { checkStaffNetwork, rejectStaffNetwork } = require('../utils/networkAccess');
 
 const router = asyncRouter();
 
 // Builds the successful-login response for a staff (users-table) account.
 // Shared by the single-account path and the both-accounts-exist path once
-// "staff" has been explicitly chosen.
-async function completeStaffLogin(user, res) {
+// "staff" has been explicitly chosen. Always called AFTER the password has
+// been verified, so the company-network check below only ever speaks to
+// someone who already has valid credentials — an outsider guessing at
+// passwords can't use it to learn which staff accounts exist.
+async function completeStaffLogin(user, req, res) {
+  const network = checkStaffNetwork(req);
+  if (!network.allowed) return rejectStaffNetwork(res, network.ip, user.user_id);
+
   const token = jwt.sign({ id: user.id, source: 'user' }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '30m'
   });
@@ -107,7 +114,7 @@ router.post('/login', async (req, res) => {
       if (staffUser.status !== 'ACTIVE') return res.status(403).json({ message: 'This account is inactive' });
       const ok = await bcrypt.compare(password, staffUser.password_hash);
       if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
-      return completeStaffLogin(staffUser, res);
+      return completeStaffLogin(staffUser, req, res);
     } else {
       if (emp.status !== 'ACTIVE') return res.status(403).json({ message: 'This account is inactive' });
       const ok = await bcrypt.compare(password, emp.password_hash);
@@ -120,7 +127,7 @@ router.post('/login', async (req, res) => {
     if (staffUser.status !== 'ACTIVE') return res.status(403).json({ message: 'This account is inactive' });
     const ok = await bcrypt.compare(password, staffUser.password_hash);
     if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
-    return completeStaffLogin(staffUser, res);
+    return completeStaffLogin(staffUser, req, res);
   }
 
   if (empHasLogin) {

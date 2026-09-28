@@ -3,6 +3,7 @@ import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
+import { API_BASE } from '../config/apiBase.js';
 
 const MODULE_LABELS = { employees: 'Employee Master', users: 'Users', upload_salary: 'Upload Salary Data' };
 const ACTION_LABELS = {
@@ -57,7 +58,7 @@ export default function Approvals() {
 
   const downloadFile = (row) => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     window.open(`${base}/api/approvals/${row.id}/file?token=${token}`, '_blank');
   };
 

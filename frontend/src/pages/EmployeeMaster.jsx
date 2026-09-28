@@ -10,6 +10,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useImportSlot } from '../context/ImportContext.jsx';
 import { showResultToast } from '../utils/approvalToast.js';
 import { streamImport } from '../utils/importProgress.js';
+import { API_BASE } from '../config/apiBase.js';
 
 const EMPTY = {
   employee_id: '', full_name: '', relative_name: '', relation: '', designation: '',
@@ -166,7 +167,7 @@ export default function EmployeeMaster() {
 
   const downloadTemplate = () => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     window.open(`${base}/api/employees/template?token=${token}`, '_blank');
   };
 
@@ -176,7 +177,7 @@ export default function EmployeeMaster() {
   // show up in the file.
   const exportToExcel = () => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     const params = new URLSearchParams();
     if (search) params.set('search', search);
     if (estFilter) params.set('establishment_id', estFilter);

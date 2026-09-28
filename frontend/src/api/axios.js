@@ -1,8 +1,8 @@
 import axios from 'axios';
+import { API_BASE } from '../config/apiBase.js';
 
 const api = axios.create({
-  // baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? ''
+  baseURL: API_BASE
 });
 
 api.interceptors.request.use((config) => {
@@ -18,6 +18,15 @@ api.interceptors.response.use(
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       if (!window.location.pathname.includes('/login')) window.location.href = '/login';
+    }
+    // A staff session that's ended up outside the company network (e.g. a
+    // laptop taken home mid-session) — sign out cleanly and say why, rather
+    // than leaving every page failing with an unexplained error. On the
+    // login page itself the server's own message is shown by the form.
+    if (err.response?.data?.code === 'NETWORK_RESTRICTED') {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (!window.location.pathname.includes('/login')) window.location.href = '/login?reason=network';
     }
     return Promise.reject(err);
   }

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { MODULE_KEYS } = require('../config/modules');
+const { checkStaffNetwork, rejectStaffNetwork } = require('../utils/networkAccess');
 
 // Every Employee Master login (app_access = 'YES') is attributed this one
 // shared "Employee" role — Salary Slips view only, nothing else — so the
@@ -64,6 +65,13 @@ async function requireAuth(req, res, next) {
       };
       return next();
     }
+
+    // Staff sessions are re-checked against the company network on EVERY
+    // request, not just at login — otherwise a token from a login done
+    // in the office would keep working from anywhere until it expires.
+    // Employee sessions (handled above) are never restricted.
+    const network = checkStaffNetwork(req);
+    if (!network.allowed) return rejectStaffNetwork(res, network.ip);
 
     const [[user]] = await pool.query(
       `SELECT u.id, u.user_id, u.email, u.status, u.role_id, u.must_change_password, r.role_name

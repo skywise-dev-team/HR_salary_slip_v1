@@ -11,6 +11,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useImportSlot } from '../context/ImportContext.jsx';
 import { streamImport } from '../utils/importProgress.js';
 import { showResultToast } from '../utils/approvalToast.js';
+import { API_BASE } from '../config/apiBase.js';
 
 const EMPTY = { user_id: '', password: '', email: '', role_id: '', can_approve: false };
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
@@ -91,7 +92,7 @@ export default function Users() {
 
   const downloadTemplate = () => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     window.open(`${base}/api/users/template?token=${token}`, '_blank');
   };
 

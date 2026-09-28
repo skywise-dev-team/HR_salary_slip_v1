@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
 import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
+import { API_BASE } from '../config/apiBase.js';
 
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
@@ -54,7 +55,7 @@ export default function ActivityLog() {
   // already accepts that as a fallback.
   const exportToExcel = () => {
     const token = localStorage.getItem('token');
-    const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const base = API_BASE;
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
     params.set('token', token);
