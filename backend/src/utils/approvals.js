@@ -1,8 +1,31 @@
 const pool = require('../config/db');
 const fs = require('fs');
 const { resolveApprovers } = require('./approvalRouting');
+const { buildChangeDetails } = require('./approvalDetails');
+const { requestEstablishments } = require('./approvalEstablishments');
 
 const EXPIRY_DAYS = 7;
+const MIN_REASON_LENGTH = 5;
+
+// The requester's reason, from the X-Change-Reason request header.
+function readChangeReason(req) {
+  const raw = req.headers['x-change-reason'];
+  if (!raw) return '';
+  let text = String(raw);
+  try { text = decodeURIComponent(text); } catch { /* sent un-encoded - use as is */ }
+  return text.trim().slice(0, 500);
+}
+
+// A request that is turned away for a missing reason has already had its
+// uploaded file(s) written to disk by multer - remove them, the retry
+// uploads them again.
+function discardUploadedFiles(req, stagedFilePath) {
+  const paths = [];
+  if (stagedFilePath) paths.push(stagedFilePath);
+  if (req.file?.path) paths.push(req.file.path);
+  if (req.files && !Array.isArray(req.files)) Object.values(req.files).flat().forEach((f) => f?.path && paths.push(f.path));
+  for (const path of new Set(paths)) fs.unlink(path, () => {});
+}
 
 function isAdminUser(req) {
   return req.user.source === 'user' && req.user.roleName === 'Admin';
@@ -15,20 +38,39 @@ function isAdminUser(req) {
 //
 // Every request always resolves to a specific set of approvers — never
 // "every Admin" — decided once, right here, at creation time: whichever
-// approvers a matching routing rule names (or the Super Admin alone, if no
-// rule matches, or if one matches but none of its named approvers are
-// currently eligible). A later edit to the routing rules never changes who
+// approvers a matching routing rule names AND who have access to the
+// request's establishment(s) (or the Super Admin alone, if no rule matches
+// or none of the named approvers is eligible for this request). A later edit to the routing rules never changes who
 // can see a request already sitting pending — it keeps whatever
 // visibility it started with.
 async function createApprovalRequest({ req, moduleKey, action, targetId = null, payload = null, stagedFilePath = null, description }) {
-  const approverIds = await resolveApprovers(moduleKey, action);
+  // Every request sent for approval must say why the change is being made.
+  // The reason travels in the X-Change-Reason header (URL-encoded) so it
+  // works the same for every kind of request - JSON forms, file uploads and
+  // Excel imports. When it is missing the request is answered with 428 and
+  // nothing is staged; the app then asks the person for the reason and
+  // sends the very same request again with it.
+  const reason = readChangeReason(req);
+  if (reason.length < MIN_REASON_LENGTH) {
+    discardUploadedFiles(req, stagedFilePath);
+    const err = new Error(`Please give your remarks for this change (at least ${MIN_REASON_LENGTH} characters).`);
+    err.status = 428;
+    throw err;
+  }
+
+  // Which establishment(s) the request is about decides who may approve it:
+  // only approvers with access to all of them (see utils/approvalRouting.js).
+  const establishmentIds = await requestEstablishments({ req, moduleKey, action, targetId, payload, stagedFilePath });
+  const approverIds = await resolveApprovers(moduleKey, action, { establishmentIds, requestedBy: req.user.id });
+  const details = await buildChangeDetails(moduleKey, action, targetId, payload);
 
   const [result] = await pool.query(
     `INSERT INTO approval_requests
-      (module_key, action, requested_by, requested_by_name, requested_by_email, target_id, payload, staged_file_path, description, expires_at, visible_to)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ${EXPIRY_DAYS} DAY), ?)`,
+      (module_key, action, requested_by, requested_by_name, requested_by_email, target_id, payload, staged_file_path, description, expires_at, visible_to, request_reason, change_details, establishment_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ${EXPIRY_DAYS} DAY), ?, ?, ?, ?)`,
     [moduleKey, action, req.user.id, req.user.userId, req.user.email || null, targetId,
-     payload ? JSON.stringify(payload) : null, stagedFilePath, description, JSON.stringify(approverIds)]
+     payload ? JSON.stringify(payload) : null, stagedFilePath, description, JSON.stringify(approverIds),
+     reason, details ? JSON.stringify(details) : null, establishmentIds.length ? JSON.stringify(establishmentIds) : null]
   );
   const approvalId = result.insertId;
 
@@ -39,7 +81,7 @@ async function createApprovalRequest({ req, moduleKey, action, targetId = null, 
     recipients = rows;
   }
 
-  const message = `${req.user.userId} requested: ${description}`;
+  const message = `${req.user.userId} requested: ${description}. Remarks: ${reason}`.slice(0, 500);
   for (const recipient of recipients) {
     await pool.query('INSERT INTO notifications (user_id, approval_id, message) VALUES (?, ?, ?)', [recipient.id, approvalId, message]);
   }

@@ -5,6 +5,10 @@ import { isTaskActive } from '../utils/activeTaskTracker.js';
 
 const AuthContext = createContext(null);
 
+// Signed out after this long with no activity (mouse, keyboard, scroll, touch).
+const IDLE_LIMIT_MS = 5 * 60 * 1000;
+const ACTIVITY_KEY = 'lastActivityAt';
+
 // Reads the `exp` claim (seconds since epoch) out of a JWT without needing
 // the secret — the payload is just base64url-encoded, not encrypted. Used
 // to schedule a mandatory logout at the exact moment the session actually
@@ -65,6 +69,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    localStorage.removeItem(ACTIVITY_KEY);
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setUser(null);
@@ -107,6 +112,38 @@ export function AuthProvider({ children }) {
     return () => clearTimeout(timer);
   }, [user]);
 
+  // Inactivity logout — 5 minutes with no mouse, keyboard, scroll or touch
+  // activity signs the person out. The time of the last activity is kept in
+  // localStorage, so several tabs share it and a tab reopened after being away
+  // longer than the limit is signed out too. The background /auth/me check
+  // above does not count as activity. A running task (bulk import) holds the
+  // logout off until it is finished.
+  useEffect(() => {
+    if (!user) return;
+    const readLast = () => Number(localStorage.getItem(ACTIVITY_KEY)) || Date.now();
+    if (Date.now() - readLast() > IDLE_LIMIT_MS && !isTaskActive()) { logout(); return; }
+
+    let lastWrite = 0;
+    const markActive = () => {
+      const now = Date.now();
+      if (now - lastWrite < 3000) return;
+      lastWrite = now;
+      try { localStorage.setItem(ACTIVITY_KEY, String(now)); } catch { /* ignore */ }
+    };
+    markActive();
+    const events = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'click', 'wheel'];
+    events.forEach((e) => window.addEventListener(e, markActive, { passive: true }));
+
+    const check = setInterval(() => {
+      if (isTaskActive()) { markActive(); return; }
+      if (Date.now() - readLast() > IDLE_LIMIT_MS) logout();
+    }, 10000);
+    return () => {
+      clearInterval(check);
+      events.forEach((e) => window.removeEventListener(e, markActive));
+    };
+  }, [user]);
+
   // Immediate logout on an admin-side access change — e.g. an employee's
   // status or App Access is flipped off, a staff account is deactivated, or
   // someone's role/permissions change — while that person is already
@@ -134,6 +171,8 @@ export function AuthProvider({ children }) {
 
   const isAdmin = user?.role === 'Admin';
   const isSuperAdmin = user?.userId === 'admin';
+  // Turned on per user (Users page), any role - decides who gets the Approvals screen.
+  const canApprove = !!user?.canApprove;
   const allowedModules = user?.allowedModules || [];
   const permissions = user?.permissions || {};
   const canView = (moduleKey) => allowedModules.includes(moduleKey);
@@ -146,7 +185,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading, isAdmin, isSuperAdmin, allowedModules, permissions, canView, can, firstAllowedPath, refreshUser }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, isAdmin, isSuperAdmin, canApprove, allowedModules, permissions, canView, can, firstAllowedPath, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

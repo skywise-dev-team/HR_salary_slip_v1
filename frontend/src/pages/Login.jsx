@@ -9,7 +9,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(() =>
     new URLSearchParams(window.location.search).get('reason') === 'network'
-      ? 'You have been signed out: staff accounts can only be used from the office network.'
+      ? 'You have been signed out: HR accounts can only be used from the office network.'
       : ''
   );
   const [busy, setBusy] = useState(false);
@@ -45,7 +45,7 @@ export default function Login() {
     try {
       const result = await login(userId, password);
       if (result.needsAccountType) {
-        // This ID belongs to both a staff account and an employee account —
+        // This ID belongs to both an HR account and an employee account —
         // hold onto the password (never re-typed) and ask which one they mean.
         setAccountChoice({ message: result.message });
         return;
@@ -82,7 +82,7 @@ export default function Login() {
           {error && <div className="alert alert-error">{error}</div>}
 
           <button className="btn btn-primary btn-block" disabled={busy} onClick={() => chooseAccount('staff')} style={{ marginBottom: 10 }}>
-            Log in as Staff
+            Log in as HR
           </button>
           <button className="btn btn-outline btn-block" disabled={busy} onClick={() => chooseAccount('employee')}>
             Log in as Employee

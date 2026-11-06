@@ -74,7 +74,7 @@ export default function ActivityLog() {
       <div className="card">
         <div className="filter-bar">
           <select value={filters.performed_by} onChange={(e) => setFilters({ ...filters, performed_by: e.target.value })}>
-            <option value="">All staff members</option>
+            <option value="">All HR users</option>
             {filterOptions.performedBy.map((id) => <option key={id} value={id}>{id}</option>)}
           </select>
           <select value={filters.role_name} onChange={(e) => setFilters({ ...filters, role_name: e.target.value })}>
@@ -107,7 +107,7 @@ export default function ActivityLog() {
         <table className="table">
           <thead>
             <tr>
-              <th>Date &amp; time</th><th>Staff member</th><th>Role</th><th>Action</th><th>Module</th><th>Details</th>
+              <th>Date &amp; time</th><th>HR user</th><th>Role</th><th>Action</th><th>Module</th><th>Details</th>
             </tr>
           </thead>
           <tbody>

@@ -4,9 +4,16 @@ import Modal from '../components/Modal.jsx';
 import Pagination from '../components/Pagination.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
+import { showResultToast } from '../utils/approvalToast.js';
 
 const EMPTY = { est_code: '', name: '', signatory_name: '', address: '' };
 const MAX_LOGO_SIGNATURE_MB = 5;
+
+// Today as yyyy-mm-dd (local time) - the default "Effective from" date.
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 
 export default function Establishments() {
@@ -25,8 +32,8 @@ export default function Establishments() {
 
   const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
-  const openAdd = () => { setEditing(null); setForm(EMPTY); setFiles({}); setError(''); setModalOpen(true); };
-  const openEdit = (row) => { setEditing(row); setForm(row); setFiles({}); setError(''); setModalOpen(true); };
+  const openAdd = () => { setEditing(null); setForm({ ...EMPTY, effective_date: todayStr() }); setFiles({}); setError(''); setModalOpen(true); };
+  const openEdit = (row) => { setEditing(row); setForm({ ...row, effective_date: todayStr() }); setFiles({}); setError(''); setModalOpen(true); };
 
   const pickFile = (field) => (e) => {
     const file = e.target.files[0];
@@ -48,10 +55,11 @@ export default function Establishments() {
     if (files.signature) fd.append('signature', files.signature);
 
     try {
-      if (editing) await api.put(`/api/establishments/${editing.id}`, fd);
-      else await api.post('/api/establishments', fd);
+      const res = editing
+        ? await api.put(`/api/establishments/${editing.id}`, fd)
+        : await api.post('/api/establishments', fd);
       setModalOpen(false);
-      showToast(editing ? 'Establishment updated successfully!' : 'Establishment added successfully!');
+      showResultToast(showToast, res, editing ? 'Establishment updated successfully!' : 'Establishment added successfully!');
       load();
     } catch (err) {
       setError(err.response?.data?.message || 'Save failed');
@@ -60,8 +68,8 @@ export default function Establishments() {
 
   const remove = async (row) => {
     if (!confirm(`Delete establishment "${row.name}"?`)) return;
-    await api.delete(`/api/establishments/${row.id}`);
-    showToast('Establishment deleted.');
+    const res = await api.delete(`/api/establishments/${row.id}`);
+    showResultToast(showToast, res, 'Establishment deleted.');
     load();
   };
 
@@ -122,12 +130,14 @@ export default function Establishments() {
             <div>
               <label>Logo</label>
               <input type="file" accept="image/*" onChange={pickFile('logo')} />
-              <small className="hint">Max {MAX_LOGO_SIGNATURE_MB} MB.</small>
             </div>
             <div>
               <label>Signature image</label>
               <input type="file" accept="image/*" onChange={pickFile('signature')} />
-              <small className="hint">Max {MAX_LOGO_SIGNATURE_MB} MB.</small>
+            </div>
+            <div className="span-2">
+              <label>Effective from</label>
+              <input type="date" value={form.effective_date || ''} max={new Date().toLocaleDateString('en-CA')} onChange={(e) => setForm({ ...form, effective_date: e.target.value })} required />
             </div>
 
             <div className="span-2 modal-actions">

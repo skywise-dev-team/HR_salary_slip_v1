@@ -9,6 +9,15 @@ const router = asyncRouter();
 router.use(requireAuth);
 router.use(requireNotPendingPasswordChange);
 
+// The Employee role is fixed: it is given automatically to Employee Master
+// logins and only ever has Salary Slips (View). It cannot be renamed, deleted
+// or given any other module.
+async function isEmployeeRole(roleId) {
+  const [[role]] = await pool.query('SELECT role_name FROM roles WHERE id = ?', [roleId]);
+  return !!role && role.role_name === 'Employee';
+}
+const EMPLOYEE_ROLE_MESSAGE = 'The Employee role only has Salary Slips and cannot be changed or deleted.';
+
 router.get('/modules', requireAuth, (req, res) => res.json(MODULES));
 
 router.get('/', requirePermission('roles_permissions', 'view'), async (req, res) => {
@@ -40,6 +49,9 @@ router.get('/:id', requirePermission('roles_permissions', 'view'), async (req, r
 
 router.post('/', requirePermission('roles_permissions', 'edit'), async (req, res) => {
   const { role_name, description, modules } = req.body;
+  if (String(role_name || '').trim().toLowerCase() === 'employee') {
+    return res.status(400).json({ message: 'The Employee role already exists and is given to employees automatically.' });
+  }
   if (!role_name || !Array.isArray(modules) || modules.length === 0) {
     return res.status(400).json({ message: 'Role name and at least one module are required' });
   }
@@ -78,6 +90,14 @@ router.post('/', requirePermission('roles_permissions', 'edit'), async (req, res
 router.put('/:id', requirePermission('roles_permissions', 'edit'), async (req, res) => {
   const { role_name, description, modules } = req.body;
   const roleId = req.params.id;
+  if (await isEmployeeRole(roleId)) {
+    // Only the description of the Employee role can be edited.
+    await pool.query('UPDATE roles SET description=? WHERE id=?', [description || null, roleId]);
+    return res.json({ message: 'Role updated' });
+  }
+  if (String(role_name || '').trim().toLowerCase() === 'employee') {
+    return res.status(400).json({ message: 'That name is reserved for the automatic Employee role.' });
+  }
 
   await pool.query('UPDATE roles SET role_name=?, description=? WHERE id=?', [role_name, description || null, roleId]);
 
@@ -107,8 +127,12 @@ router.put('/:id', requirePermission('roles_permissions', 'edit'), async (req, r
 router.put('/:id/permissions', requirePermission('roles_permissions', 'edit'), async (req, res) => {
   const { permissions } = req.body; // [{ module_key, can_view, can_edit, can_delete }]
   if (!Array.isArray(permissions)) return res.status(400).json({ message: 'permissions array is required' });
+  if (await isEmployeeRole(req.params.id)) return res.status(400).json({ message: EMPLOYEE_ROLE_MESSAGE });
 
+  // These modules only ever have View (Salary Slips: preview and download).
+  const VIEW_ONLY = ['dashboard', 'activity_log', 'salary_slips'];
   for (const p of permissions) {
+    if (VIEW_ONLY.includes(p.module_key)) { p.can_edit = false; p.can_delete = false; }
     await pool.query(
       `INSERT INTO role_modules (role_id, module_key, can_view, can_edit, can_delete)
        VALUES (?, ?, ?, ?, ?)
@@ -122,6 +146,7 @@ router.put('/:id/permissions', requirePermission('roles_permissions', 'edit'), a
 });
 
 router.delete('/:id', requirePermission('roles_permissions', 'delete'), async (req, res) => {
+  if (await isEmployeeRole(req.params.id)) return res.status(400).json({ message: EMPLOYEE_ROLE_MESSAGE });
   const [[role]] = await pool.query('SELECT role_name FROM roles WHERE id = ?', [req.params.id]);
   await pool.query('DELETE FROM roles WHERE id = ?', [req.params.id]);
   res.json({ message: 'Role deleted' });

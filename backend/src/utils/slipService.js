@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const pool = require('../config/db');
 const { generateSalarySlipPdf, formatDate } = require('./pdfGenerator');
+const { captureSnapshotAt } = require('./effectiveDating');
 
 const LOGOS_DIR = path.join(__dirname, '..', '..', 'uploads', 'logos');
 const SIGNATURES_DIR = path.join(__dirname, '..', '..', 'uploads', 'signatures');
@@ -20,7 +21,12 @@ const SIGNATURES_DIR = path.join(__dirname, '..', '..', 'uploads', 'signatures')
 // upload gets its own unique filename — see middleware/upload.js), so the
 // exact logo_path/signature_path string captured here keeps resolving to
 // the historically correct file even after a later change.
-async function captureSlipSnapshot(employeeId, establishmentId, db = pool) {
+async function captureSlipSnapshot(employeeId, establishmentId, periodMonth, periodYear, db = pool) {
+  // With a pay month, the employee/establishment details in force for THAT
+  // month are used (effective-dated versions). Without one, the live values.
+  if (periodMonth && periodYear) {
+    return captureSnapshotAt(employeeId, establishmentId, periodMonth, periodYear, db);
+  }
   const [[emp]] = await db.query(
     `SELECT employee_id AS emp_code, full_name, relative_name, relation, designation, uan, bank_account_no
      FROM employees WHERE id = ?`,
@@ -49,6 +55,19 @@ function resolveImagePaths(snapshot) {
   return { logo_path, signature_path };
 }
 
+// Employee / establishment details for a slip, worked out RIGHT NOW from the
+// effective-dated versions for the slip's pay month — so a change to an
+// effective-from date (or to the details) shows on the very next preview or
+// download, for monthly and arrear slips alike. The stored slip_snapshot is
+// only a fallback for a record whose employee or establishment can no longer
+// be found.
+async function detailsForSlip(stored, employeeId, establishmentId, month, year, db, asOfDay = null) {
+  let live = null;
+  try { live = JSON.parse(await captureSnapshotAt(employeeId, establishmentId, month, year, db, asOfDay)); } catch { live = null; }
+  if (live && live.emp_code && live.establishment_name != null) return live;
+  return { ...(stored || {}), ...(live || {}) };
+}
+
 // Builds the exact "record" shape generateSalarySlipPdf() expects, for one
 // salary_data row. Uses that row's own frozen slip_snapshot whenever one
 // exists — the normal path for every row created going forward. Falls back
@@ -63,8 +82,10 @@ async function buildSlipRecord(salaryDataId, db = pool) {
   // auto-deserializes that into a real object already, not a string
   // needing JSON.parse (the same gotcha as the payload column elsewhere
   // in this app).
-  let snapshot = sd.slip_snapshot;
-  if (!snapshot) {
+  // Monthly slip: details in force by the LAST DAY of the pay month — a change
+  // effective 05-08 is not on the July slip, but is on the August slip.
+  let snapshot = await detailsForSlip(sd.slip_snapshot, sd.employee_id, sd.establishment_id, sd.period_month, sd.period_year, db);
+  if (!snapshot || !snapshot.emp_code) {
     const [[emp]] = await db.query(
       `SELECT employee_id AS emp_code, full_name, relative_name, relation, designation, uan, bank_account_no
        FROM employees WHERE id = ?`,
@@ -104,4 +125,53 @@ async function generateSlipBuffer(salaryDataId, db = pool) {
   return generateSalarySlipPdf(record);
 }
 
-module.exports = { captureSlipSnapshot, buildSlipRecord, generateSlipBuffer, LOGOS_DIR, SIGNATURES_DIR };
+// ---------------------------------------------------------------------------
+// Arrear slips. Same idea as the monthly slip: nothing is ever saved. The
+// slip is built from the arrear_data row (and the employee/establishment
+// details frozen in its slip_snapshot) and generated fresh, right now, every
+// time someone previews or downloads it. The "Date of issue" is the date the
+// uploader typed in for that record.
+// ---------------------------------------------------------------------------
+async function buildArrearSlipRecord(arrearId, db = pool) {
+  const [[a]] = await db.query(
+    `SELECT a.*, DATE_FORMAT(a.date_of_issue, '%d-%m-%Y') AS issue_date_text,
+            DATE_FORMAT(a.date_of_issue, '%Y-%m-%d') AS issue_date_iso
+     FROM arrear_data a WHERE a.id = ?`,
+    [arrearId]
+  );
+  if (!a) throw new Error(`Arrear record ${arrearId} not found`);
+
+  // Arrear slips show the employee / establishment details in force on the
+  // slip's DATE OF ISSUE (the latest detail change effective on or before it).
+  let snapshot = await detailsForSlip(a.slip_snapshot, a.employee_id, a.establishment_id, a.arrear_to_month, a.arrear_to_year, db, a.issue_date_iso || null);
+  if (!snapshot || !snapshot.emp_code) {
+    const [[emp]] = await db.query(
+      `SELECT employee_id AS emp_code, full_name, relative_name, relation, designation, uan, bank_account_no
+       FROM employees WHERE id = ?`,
+      [a.employee_id]
+    );
+    const [[est]] = await db.query(
+      `SELECT name AS establishment_name, address, signatory_name, logo_path, signature_path
+       FROM establishments WHERE id = ?`,
+      [a.establishment_id]
+    );
+    snapshot = { ...emp, ...est };
+  }
+
+  const { logo_path, signature_path } = resolveImagePaths(snapshot);
+  return {
+    ...a,
+    ...snapshot,
+    logo_path,
+    signature_path,
+    isArrear: true,
+    issueDate: a.issue_date_text || formatDate(new Date())
+  };
+}
+
+async function generateArrearSlipBuffer(arrearId, db = pool) {
+  const record = await buildArrearSlipRecord(arrearId, db);
+  return generateSalarySlipPdf(record);
+}
+
+module.exports = { captureSlipSnapshot, buildSlipRecord, generateSlipBuffer, buildArrearSlipRecord, generateArrearSlipBuffer, LOGOS_DIR, SIGNATURES_DIR };

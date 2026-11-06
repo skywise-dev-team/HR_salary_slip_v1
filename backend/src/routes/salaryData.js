@@ -8,9 +8,12 @@ const { excelImport } = require('../middleware/upload');
 const { captureSlipSnapshot } = require('../utils/slipService');
 const { startImportProgress } = require('../utils/importProgress');
 const { findNullCellProblems, nullCellErrorMessage } = require('../utils/nullCellCheck');
-const { sendTemplate } = require('../utils/excelTemplates');
+const { sendTemplate, sendDataExport } = require('../utils/excelTemplates');
 const { logActivity } = require('../utils/activityLog');
 const { isAdminUser, createApprovalRequest } = require('../utils/approvals');
+const { checkFigures } = require('../utils/figureCheck');
+const { employeeLabel, recordEmployeesText, salaryRecordLabel, periodText, cut } = require('../utils/approvalLabels');
+const { isRestricted, inScope, addScope, allowEstablishment, allowRecords } = require('../utils/establishmentScope');
 
 const router = asyncRouter();
 router.use(requireAuth);
@@ -25,6 +28,7 @@ const TEMPLATE_EXAMPLE = ['11005001', 6, 2026, 26, 23456, 1245, 1400, 0, 0, 1800
 
 const EARNINGS_COLUMNS = ['basic', 'da', 'hra', 'conveyance_allowance', 'overtime'];
 const DEDUCTION_COLUMNS = ['pf_deduction', 'esi_deduction', 'pt_deduction', 'tds_deduction', 'other_deduction'];
+const FIGURE_COLUMNS = ['paid_days', ...EARNINGS_COLUMNS, ...DEDUCTION_COLUMNS];
 
 // period_month must be an integer 1-12; period_year must be a proper 4-digit
 // "yyyy" value — neither blank/0 (already caught elsewhere as a blank cell)
@@ -89,6 +93,36 @@ function validateSalaryFigures(getValue, periodMonth, periodYear) {
   return null;
 }
 
+const { employmentWindowError, EMP_WINDOW_SQL, WINDOW_MONTHS } = require('../utils/employmentWindow');
+
+async function findEmploymentWindowProblems(sheet, colIndex) {
+  const rows = [];
+  const codes = new Set();
+  for (let r = 2; r <= sheet.rowCount; r++) {
+    const row = sheet.getRow(r);
+    if (!row.hasValues) continue;
+    const code = row.getCell(colIndex('employee_id')).value;
+    const m = Number(row.getCell(colIndex('period_month')).value);
+    const y = Number(row.getCell(colIndex('period_year')).value);
+    if (code == null || String(code).trim() === '' || !Number.isFinite(m) || !Number.isFinite(y)) continue;
+    rows.push({ r, code: String(code).trim(), m, y });
+    codes.add(String(code).trim());
+  }
+  const byCode = {};
+  const list = [...codes];
+  for (let i = 0; i < list.length; i += 1000) {
+    const [emps] = await pool.query(`${EMP_WINDOW_SQL} WHERE employee_id IN (?)`, [list.slice(i, i + 1000)]);
+    emps.forEach((e) => { byCode[e.employee_id] = e; });
+  }
+  const problems = [];
+  for (const { r, code, m, y } of rows) {
+    if (!byCode[code]) continue;
+    const err = employmentWindowError(byCode[code], m, y, `Employee "${code}"`);
+    if (err) problems.push(`Row ${r}: ${err}`);
+  }
+  return problems;
+}
+
 // Detects the SAME (employee_id, period_month, period_year) combination
 // appearing more than once within one uploaded file — e.g. the same
 // employee's April 2026 row listed twice by mistake. Without this check,
@@ -140,6 +174,54 @@ router.get('/template', requirePermission('upload_salary', 'edit'), async (req, 
   await sendTemplate(res, 'salary-data-template.xlsx', TEMPLATE_HEADERS, TEMPLATE_EXAMPLE);
 });
 
+// Downloads one establishment + period's existing salary records in exactly
+// the import template's layout, so the file can be edited in Excel and
+// uploaded straight back through "Import from Excel", which updates
+// existing rows instead of rejecting them.
+//
+// The trailing "note" column is ignored by the importer. It is filled in
+// only for an employee who has since been moved to another establishment:
+// an import looks the employee up by their CURRENT establishment, so
+// re-importing such a row would create a second record under the new
+// establishment instead of editing this one. Those rows are better edited
+// on screen.
+router.get('/export', requirePermission('upload_salary', 'view'), async (req, res) => {
+  const { establishment_id, month, year } = req.query;
+  if (!establishment_id || !month || !year) {
+    return res.status(400).json({ message: 'Establishment, month and year are required' });
+  }
+  if (!allowEstablishment(req, res, establishment_id)) return;
+  const [rows] = await pool.query(
+    `SELECT sd.paid_days, sd.basic, sd.hra, sd.da, sd.conveyance_allowance, sd.overtime,
+            sd.pf_deduction, sd.esi_deduction, sd.pt_deduction, sd.tds_deduction, sd.other_deduction,
+            sd.period_month, sd.period_year, sd.establishment_id,
+            e.employee_id AS emp_code, e.establishment_id AS current_establishment_id,
+            es.name AS establishment_name
+     FROM salary_data sd
+     JOIN employees e ON e.id = sd.employee_id
+     JOIN establishments es ON es.id = sd.establishment_id
+     WHERE sd.establishment_id = ? AND sd.period_month = ? AND sd.period_year = ?
+     ORDER BY e.full_name`,
+    [establishment_id, month, year]
+  );
+  if (!rows.length) return res.status(404).json({ message: 'No salary records found for this establishment and period' });
+
+  // MySQL returns DECIMAL columns as strings; numbers go into the sheet as
+  // real numeric cells so they round-trip through the importer unchanged.
+  const n = (v) => Number(v) || 0;
+  const dataRows = rows.map((r) => [
+    r.emp_code, r.period_month, r.period_year, n(r.paid_days), n(r.basic), n(r.hra), n(r.da),
+    n(r.conveyance_allowance), n(r.overtime), n(r.pf_deduction), n(r.esi_deduction), n(r.pt_deduction),
+    n(r.tds_deduction), n(r.other_deduction),
+    r.current_establishment_id !== r.establishment_id
+      ? 'Moved to another establishment since this period - edit on screen, do not re-import this row'
+      : ''
+  ]);
+  const safeName = String(rows[0].establishment_name).replace(/[^A-Za-z0-9._-]+/g, '_');
+  const fileName = `salary-data_${safeName}_${rows[0].period_year}-${String(rows[0].period_month).padStart(2, '0')}.xlsx`;
+  await sendDataExport(res, fileName, [...TEMPLATE_HEADERS, 'note'], dataRows);
+});
+
 const LIST_SQL = `
   SELECT sd.id, sd.establishment_id, sd.employee_id, sd.period_month, sd.period_year,
          sd.paid_days, sd.basic, sd.hra, sd.da, sd.conveyance_allowance, sd.overtime,
@@ -160,6 +242,7 @@ router.get('/', requirePermission('upload_salary', 'view'), async (req, res) => 
   if (month) { clauses.push('sd.period_month = ?'); params.push(month); }
   if (year) { clauses.push('sd.period_year = ?'); params.push(year); }
   if (search) { clauses.push('(e.employee_id LIKE ? OR e.full_name LIKE ?)'); params.push(`%${search}%`, `%${search}%`); }
+  addScope(req, clauses, params, 'sd.establishment_id');
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const [rows] = await pool.query(`${LIST_SQL} ${where} ORDER BY sd.period_year DESC, sd.period_month DESC`, params);
@@ -179,6 +262,7 @@ router.get('/summary', requirePermission('upload_salary', 'view'), async (req, r
   if (establishment_id) { clauses.push('sd.establishment_id = ?'); params.push(establishment_id); }
   if (month) { clauses.push('sd.period_month = ?'); params.push(month); }
   if (year) { clauses.push('sd.period_year = ?'); params.push(year); }
+  addScope(req, clauses, params, 'sd.establishment_id');
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const [rows] = await pool.query(
@@ -220,6 +304,9 @@ router.delete('/groups', requirePermission('upload_salary', 'delete'), async (re
   if (!Array.isArray(groups) || !groups.length) {
     return res.status(400).json({ message: 'No establishment/period groups selected' });
   }
+  for (const g of groups) {
+    if (!allowEstablishment(req, res, g.establishment_id)) return;
+  }
 
   if (!isAdminUser(req)) {
     await createApprovalRequest({
@@ -234,13 +321,51 @@ router.delete('/groups', requirePermission('upload_salary', 'delete'), async (re
   if (result.deleted) await logActivity(req, 'DELETE', 'upload_salary', `Deleted ${result.deleted} salary record(s) across ${groups.length} establishment/period group(s)`);
 });
 
+// Deletes several individual salary records (ticked employees inside one
+// establishment/period group). Different from BULK_DELETE above, which
+// removes whole groups.
+const BULK_RECORD_DELETE_MAX = 500;
+
+async function applyBulkDeleteSalaryRecords(ids) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return { deleted: 0 };
+  const [result] = await pool.query('DELETE FROM salary_data WHERE id IN (?)', [list]);
+  return { deleted: result.affectedRows };
+}
+
+router.delete('/records', requirePermission('upload_salary', 'delete'), async (req, res) => {
+  const raw = Array.isArray(req.body.ids) ? req.body.ids : [];
+  const ids = [...new Set(raw.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return res.status(400).json({ message: 'No salary records selected' });
+  if (ids.length > BULK_RECORD_DELETE_MAX) {
+    return res.status(400).json({ message: `Too many records selected (limit ${BULK_RECORD_DELETE_MAX})` });
+  }
+  const [found] = await pool.query('SELECT id FROM salary_data WHERE id IN (?)', [ids]);
+  if (found.length !== ids.length) {
+    return res.status(404).json({ message: 'Some of the selected salary records no longer exist. Refresh and try again.' });
+  }
+  if (!(await allowRecords(req, res, 'salary_data', ids))) return;
+
+  if (!isAdminUser(req)) {
+    await createApprovalRequest({
+      req, moduleKey: 'upload_salary', action: 'BULK_DELETE_RECORDS', payload: { ids },
+      description: cut(`Delete ${ids.length} salary record(s) of employee(s) ${await recordEmployeesText('salary_data', ids)}`)
+    });
+    return res.status(202).json({ message: 'Submitted for approval, pending.' });
+  }
+
+  const result = await applyBulkDeleteSalaryRecords(ids);
+  res.json({ message: `${result.deleted} salary record(s) deleted`, deleted: result.deleted });
+  if (result.deleted) await logActivity(req, 'DELETE', 'upload_salary', `Deleted ${result.deleted} selected salary record(s) (IDs ${ids.join(', ')})`);
+});
+
 // Applies a new salary record directly, generating its slip immediately
 // after. `uploadedBy` is recorded as whoever actually entered the figures —
 // the original requester when this runs via an approved request, not the
 // Admin who approved it.
 async function applyCreateSalaryData(b, uploadedBy) {
   const totals = computeTotals(b);
-  const slipSnapshot = await captureSlipSnapshot(b.employee_id, b.establishment_id);
+  const slipSnapshot = await captureSlipSnapshot(b.employee_id, b.establishment_id, b.period_month, b.period_year);
   const [result] = await pool.query(
     `INSERT INTO salary_data
       (establishment_id, employee_id, period_month, period_year, paid_days, basic, hra, da,
@@ -261,15 +386,24 @@ router.post('/', requirePermission('upload_salary', 'edit'), async (req, res) =>
   if (!b.establishment_id || !b.employee_id || !b.period_month || !b.period_year) {
     return res.status(400).json({ message: 'Establishment, employee and period are required' });
   }
+  if (!allowEstablishment(req, res, b.establishment_id)) return;
+  if (!(await allowRecords(req, res, 'employees', [b.employee_id]))) return;
   const periodError = validatePeriod(b.period_month, b.period_year);
   if (periodError) return res.status(400).json({ message: periodError });
+  const filledError = checkFigures((name) => b[name], FIGURE_COLUMNS, { basicWhenPaid: true });
+  if (filledError) return res.status(400).json({ message: filledError });
   const figuresError = validateSalaryFigures((name) => b[name] || 0, b.period_month, b.period_year);
   if (figuresError) return res.status(400).json({ message: figuresError });
+  {
+    const [[win]] = await pool.query(`${EMP_WINDOW_SQL} WHERE id = ?`, [b.employee_id]);
+    const windowError = win ? employmentWindowError(win, b.period_month, b.period_year, `Employee ${win.employee_id}`) : null;
+    if (windowError) return res.status(400).json({ message: windowError });
+  }
 
   if (!isAdminUser(req)) {
     await createApprovalRequest({
       req, moduleKey: 'upload_salary', action: 'CREATE', payload: b,
-      description: `Add salary record for employee ID ${b.employee_id}, period ${b.period_month}/${b.period_year}`
+      description: cut(`Add salary record for employee ${await employeeLabel(b.employee_id)}, period ${periodText(b.period_month, b.period_year)}`)
     });
     return res.status(202).json({ message: 'Submitted for approval, pending.' });
   }
@@ -277,11 +411,124 @@ router.post('/', requirePermission('upload_salary', 'edit'), async (req, res) =>
   try {
     const result = await applyCreateSalaryData(b, req.user.id);
     res.status(201).json({ id: result.id });
-    await logActivity(req, 'CREATE', 'upload_salary', `Added salary record for employee ID ${b.employee_id}, period ${b.period_month}/${b.period_year}`);
+    await logActivity(req, 'CREATE', 'upload_salary', `Added salary record for employee ${await employeeLabel(b.employee_id)}, period ${periodText(b.period_month, b.period_year)}`, Number(b.establishment_id));
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ message: 'A record for this employee and period already exists' });
     }
+    throw err;
+  }
+});
+
+// ---------------------------------------------------------------
+// Bulk edit: apply the same new value(s) to several salary records at once.
+// ---------------------------------------------------------------
+// The figures a bulk edit may change - the same editable inputs as a
+// single-record edit. Gross earnings, total deductions and net pay are never
+// set directly; they are always recomputed from these.
+const BULK_EDITABLE_FIELDS = [
+  'paid_days', 'basic', 'hra', 'da', 'conveyance_allowance', 'overtime',
+  'pf_deduction', 'esi_deduction', 'pt_deduction', 'tds_deduction', 'other_deduction'
+];
+const BULK_UPDATE_MAX_RECORDS = 5000;
+
+// A problem with the requested change itself (as opposed to a database
+// fault) - safe to show to the person as-is.
+class BulkEditError extends Error {}
+
+// Reduces the request body to just the known editable fields that were
+// actually filled in. Blank means "leave each record's own value alone".
+function parseBulkChanges(raw) {
+  const changes = {};
+  for (const field of BULK_EDITABLE_FIELDS) {
+    const v = raw?.[field];
+    if (v === undefined || v === null || String(v).trim() === '') continue;
+    const num = Number(v);
+    if (!Number.isFinite(num)) throw new BulkEditError(`${field} must be a number`);
+    if (num < 0) throw new BulkEditError(`${field} cannot be negative`);
+    changes[field] = num;
+  }
+  if (!Object.keys(changes).length) throw new BulkEditError('Enter a new value for at least one field');
+  return changes;
+}
+
+// Merges the change into every selected record and runs the exact same
+// consistency checks a single edit gets (DA/HRA/conveyance within basic,
+// deductions within gross, paid days within the month). Nothing is written
+// here - if even one record would end up inconsistent, the whole bulk edit
+// is refused and the message names that employee.
+async function prepareBulkUpdate(ids, changes) {
+  const placeholders = ids.map(() => '?').join(',');
+  const [records] = await pool.query(
+    `SELECT sd.id, sd.period_month, sd.period_year, sd.paid_days, sd.basic, sd.hra, sd.da,
+            sd.conveyance_allowance, sd.overtime, sd.pf_deduction, sd.esi_deduction,
+            sd.pt_deduction, sd.tds_deduction, sd.other_deduction, e.employee_id AS emp_code
+     FROM salary_data sd JOIN employees e ON e.id = sd.employee_id
+     WHERE sd.id IN (${placeholders})`,
+    ids
+  );
+  if (records.length !== ids.length) {
+    throw new BulkEditError('Some of the selected salary records no longer exist - refresh the page and try again');
+  }
+  return records.map((rec) => {
+    const next = {};
+    BULK_EDITABLE_FIELDS.forEach((f) => { next[f] = changes[f] !== undefined ? changes[f] : (Number(rec[f]) || 0); });
+    const error = validateSalaryFigures((name) => next[name], rec.period_month, rec.period_year);
+    if (error) throw new BulkEditError(`Employee ${rec.emp_code}: ${error}`);
+    return { id: rec.id, next };
+  });
+}
+
+// All-or-nothing: every record is validated first, then every write runs in
+// one transaction. Like a single edit, this never touches slip_snapshot.
+// Also run again when an approved request is applied, so a request that was
+// valid when submitted but no longer is (data changed meanwhile) is refused
+// rather than applied blindly.
+async function applyBulkUpdateSalaryData(ids, changes) {
+  const prepared = await prepareBulkUpdate(ids, changes);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const { id, next } of prepared) await applyUpdateSalaryData(id, next, conn);
+    await conn.commit();
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+  return { updated: prepared.length };
+}
+
+router.put('/bulk-update', requirePermission('upload_salary', 'edit'), async (req, res) => {
+  const rawIds = Array.isArray(req.body.ids) ? req.body.ids : [];
+  const ids = [...new Set(rawIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return res.status(400).json({ message: 'No salary records selected' });
+  if (ids.length > BULK_UPDATE_MAX_RECORDS) {
+    return res.status(400).json({ message: `Too many records selected (limit ${BULK_UPDATE_MAX_RECORDS})` });
+  }
+  if (!(await allowRecords(req, res, 'salary_data', ids))) return;
+
+  try {
+    const changes = parseBulkChanges(req.body.changes);
+    const fieldList = Object.keys(changes).join(', ');
+
+    if (!isAdminUser(req)) {
+      // Checked now too, so the person hears about a problem immediately
+      // instead of only when an Admin tries to approve it.
+      await prepareBulkUpdate(ids, changes);
+      await createApprovalRequest({
+        req, moduleKey: 'upload_salary', action: 'BULK_UPDATE', payload: { ids, changes },
+        description: cut(`Bulk edit ${ids.length} salary record(s) of employee(s) ${await recordEmployeesText('salary_data', ids)}: ${fieldList}`)
+      });
+      return res.status(202).json({ message: 'Submitted for approval, pending.' });
+    }
+
+    const result = await applyBulkUpdateSalaryData(ids, changes);
+    res.json({ message: `${result.updated} salary record(s) updated`, updated: result.updated });
+    await logActivity(req, 'UPDATE', 'upload_salary', `Bulk edited ${result.updated} salary record(s): ${fieldList}`);
+  } catch (err) {
+    if (err instanceof BulkEditError) return res.status(400).json({ message: err.message });
     throw err;
   }
 });
@@ -291,9 +538,9 @@ router.post('/', requirePermission('upload_salary', 'edit'), async (req, res) =>
 // from then on, exactly so an edit here (or a later employee/establishment
 // change) can never retroactively alter an already-issued slip's
 // designation, bank account, address, signatory name, etc.
-async function applyUpdateSalaryData(id, b) {
+async function applyUpdateSalaryData(id, b, db = pool) {
   const totals = computeTotals(b);
-  await pool.query(
+  await db.query(
     `UPDATE salary_data SET paid_days=?, basic=?, hra=?, da=?, conveyance_allowance=?, overtime=?,
        gross_earnings=?, pf_deduction=?, esi_deduction=?, pt_deduction=?, tds_deduction=?,
        other_deduction=?, total_deduction=?, net_pay=?, downloaded=0
@@ -306,23 +553,26 @@ async function applyUpdateSalaryData(id, b) {
 }
 
 router.put('/:id', requirePermission('upload_salary', 'edit'), async (req, res) => {
-  const [[existing]] = await pool.query('SELECT id, period_month, period_year FROM salary_data WHERE id = ?', [req.params.id]);
+  const [[existing]] = await pool.query('SELECT id, establishment_id, period_month, period_year FROM salary_data WHERE id = ?', [req.params.id]);
   if (!existing) return res.status(404).json({ message: 'Salary record not found' });
+  if (!allowEstablishment(req, res, existing.establishment_id)) return;
 
+  const filledError = checkFigures((name) => req.body[name], FIGURE_COLUMNS, { basicWhenPaid: true });
+  if (filledError) return res.status(400).json({ message: filledError });
   const figuresError = validateSalaryFigures((name) => req.body[name] || 0, existing.period_month, existing.period_year);
   if (figuresError) return res.status(400).json({ message: figuresError });
 
   if (!isAdminUser(req)) {
     await createApprovalRequest({
       req, moduleKey: 'upload_salary', action: 'UPDATE', targetId: req.params.id, payload: req.body,
-      description: `Edit salary record ID ${req.params.id}`
+      description: cut(`Edit salary record of employee ${await salaryRecordLabel(req.params.id)}`)
     });
     return res.status(202).json({ message: 'Submitted for approval, pending.' });
   }
 
   await applyUpdateSalaryData(req.params.id, req.body);
   res.json({ message: 'Salary record updated' });
-  await logActivity(req, 'UPDATE', 'upload_salary', `Updated salary record ID ${req.params.id}`);
+  await logActivity(req, 'UPDATE', 'upload_salary', `Updated salary record ID ${req.params.id}`, existing.establishment_id);
 });
 
 async function applyDeleteSalaryData(id) {
@@ -331,21 +581,53 @@ async function applyDeleteSalaryData(id) {
 }
 
 router.delete('/:id', requirePermission('upload_salary', 'delete'), async (req, res) => {
-  const [[existing]] = await pool.query('SELECT id FROM salary_data WHERE id = ?', [req.params.id]);
+  const [[existing]] = await pool.query('SELECT id, establishment_id FROM salary_data WHERE id = ?', [req.params.id]);
   if (!existing) return res.status(404).json({ message: 'Salary record not found' });
+  if (!allowEstablishment(req, res, existing.establishment_id)) return;
 
   if (!isAdminUser(req)) {
     await createApprovalRequest({
       req, moduleKey: 'upload_salary', action: 'DELETE', targetId: req.params.id,
-      description: `Delete salary record ID ${req.params.id}`
+      description: cut(`Delete salary record of employee ${await salaryRecordLabel(req.params.id)}`)
     });
     return res.status(202).json({ message: 'Submitted for approval, pending.' });
   }
 
   await applyDeleteSalaryData(req.params.id);
   res.json({ message: 'Salary record deleted' });
-  await logActivity(req, 'DELETE', 'upload_salary', `Deleted salary record ID ${req.params.id}`);
+  await logActivity(req, 'DELETE', 'upload_salary', `Deleted salary record ID ${req.params.id}`, existing.establishment_id);
 });
+
+// For someone limited to some establishments: every row of an Excel upload must
+// be for an employee of an establishment they have access to. Returns a list of
+// problems (empty = fine), checked before anything is saved or staged.
+async function findEstablishmentScopeProblems(req, sheet, colIndex) {
+  if (!isRestricted(req)) return [];
+  const rows = [];
+  const codes = new Set();
+  for (let r = 2; r <= sheet.rowCount; r++) {
+    const row = sheet.getRow(r);
+    if (!row.hasValues) continue;
+    const raw = row.getCell(colIndex('employee_id')).value;
+    if (raw == null || String(raw).trim() === '') continue;
+    const code = String(raw).trim();
+    codes.add(code);
+    rows.push({ r, code });
+  }
+  const estOf = {};
+  const list = [...codes];
+  for (let i = 0; i < list.length; i += 1000) {
+    const [emps] = await pool.query('SELECT employee_id, establishment_id FROM employees WHERE employee_id IN (?)', [list.slice(i, i + 1000)]);
+    emps.forEach((e) => { estOf[e.employee_id] = e.establishment_id; });
+  }
+  const problems = [];
+  for (const { r, code } of rows) {
+    if (estOf[code] !== undefined && !inScope(req, estOf[code])) {
+      problems.push(`Row ${r}: employee "${code}" belongs to an establishment you do not have access to`);
+    }
+  }
+  return problems;
+}
 
 // Shared by the direct-upload path (Admin, streamed) and the
 // approval-triggered path (everyone else, applied later, no streaming).
@@ -393,7 +675,7 @@ async function processSalaryDataImportRows(conn, sheet, colIndex, results, repor
       // which deliberately never touches slip_snapshot) — simpler than
       // pre-checking whether the row already exists, and the extra lookup
       // costs nothing meaningful.
-      const slipSnapshot = await captureSlipSnapshot(emp.id, emp.establishment_id, conn);
+      const slipSnapshot = await captureSlipSnapshot(emp.id, emp.establishment_id, periodMonth, periodYear, conn);
 
       await conn.query(
         `INSERT INTO salary_data
@@ -472,6 +754,8 @@ router.post(
       (row, ci) => {
         const periodError = validatePeriod(row.getCell(ci('period_month')).value, row.getCell(ci('period_year')).value);
         if (periodError) return periodError;
+        const negative = checkFigures((name) => row.getCell(ci(name)).value, FIGURE_COLUMNS, { basicWhenPaid: true });
+        if (negative) return negative;
         return validateSalaryFigures(
           (name) => row.getCell(ci(name)).value,
           row.getCell(ci('period_month')).value,
@@ -486,9 +770,15 @@ router.post(
     // way regardless of the database's own primary-key structure.
     const duplicateProblems = findDuplicatePeriodsInSheet(sheet, colIndex);
     const allProblems = [...nullProblems, ...duplicateProblems];
+    if (!allProblems.length) allProblems.push(...await findEmploymentWindowProblems(sheet, colIndex));
     if (allProblems.length) {
       fs.unlink(req.file.path, () => {});
       return res.status(400).json({ message: nullCellErrorMessage(allProblems) });
+    }
+    const scopeProblems = await findEstablishmentScopeProblems(req, sheet, colIndex);
+    if (scopeProblems.length) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(403).json({ message: nullCellErrorMessage(scopeProblems) });
     }
 
     // Non-Admin: the file already passed the same validation an Admin's
@@ -565,8 +855,17 @@ async function applyApprovedSalaryDataAction(action, targetId, payload, requeste
       return applyDeleteSalaryData(targetId);
     case 'BULK_DELETE':
       return applyDeleteGroups(payload.groups);
+    case 'BULK_UPDATE':
+      return applyBulkUpdateSalaryData(payload.ids, payload.changes);
+    case 'BULK_DELETE_RECORDS':
+      return applyBulkDeleteSalaryRecords(payload.ids);
     case 'IMPORT':
       return applyImportSalaryData(stagedFilePath, requestedBy);
+    case 'ARREAR_CREATE':
+    case 'ARREAR_UPDATE':
+    case 'ARREAR_DELETE':
+    case 'ARREAR_IMPORT':
+      return require('./arrearData').applyApprovedAction(action, targetId, payload, requestedBy, stagedFilePath);
     default:
       throw new Error(`Unknown action "${action}" for upload_salary`);
   }

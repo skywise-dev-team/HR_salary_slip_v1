@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react';
 import Layout from '../components/Layout.jsx';
 import Modal from '../components/Modal.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
+import EmployeePicker from '../components/EmployeePicker.jsx';
 import Pagination from '../components/Pagination.jsx';
+import ArrearUpload from '../components/ArrearUpload.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
 import { useImportSlot } from '../context/ImportContext.jsx';
 import { formatINR } from '../utils/formatCurrency.js';
 import { streamImport } from '../utils/importProgress.js';
@@ -22,6 +25,15 @@ const EMPTY = {
 
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
+// The figures that can be edited on an existing salary record, one at a time
+// or for several records at once: [field name, label].
+const FIGURE_FIELDS = [
+  ['paid_days', 'Paid days'], ['basic', 'Basic'], ['hra', 'HRA'], ['da', 'DA'],
+  ['conveyance_allowance', 'Conveyance Allowance'], ['overtime', 'Overtime'],
+  ['pf_deduction', 'PF deduction'], ['esi_deduction', 'ESI deduction'], ['pt_deduction', 'P-Tax deduction'],
+  ['tds_deduction', 'TDS deduction'], ['other_deduction', 'Other deduction']
+];
+
 export default function UploadSalaryData() {
   const [rows, setRows] = useState([]);
   const [syncing, setSyncing] = useState(true);
@@ -36,6 +48,7 @@ export default function UploadSalaryData() {
   const [warning, setWarning] = useState('');
   const [selectedGroups, setSelectedGroups] = useState([]);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [arrearOpen, setArrearOpen] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const [groupEmployees, setGroupEmployees] = useState({});
   const [groupSearch, setGroupSearch] = useState({});
@@ -44,11 +57,22 @@ export default function UploadSalaryData() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const { showToast } = useToast();
+  const { can } = useAuth();
+  const canEdit = can('upload_salary', 'edit');
+  const canDelete = can('upload_salary', 'delete');
+  // Tick boxes are only needed for Delete selected.
+  const canSelect = canDelete;
+
+  // Editing one record, editing several at once, and the Excel round-trip.
+  const [editRecord, setEditRecord] = useState(null);        // the record whose edit form is open
+  const [editForm, setEditForm] = useState({});
+  const [editError, setEditError] = useState('');
+  const [selectedRecords, setSelectedRecords] = useState({}); // group key -> ids of ticked employee records
 
   const load = () => {
     const params = {};
     Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
-    api.get('/api/salary-data/summary', { params }).then(({ data }) => { setRows(data); setSelectedGroups([]); });
+    api.get('/api/salary-data/summary', { params }).then(({ data }) => setRows(data));   // ticked groups stay ticked across filters
   };
 
   const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
@@ -58,11 +82,18 @@ export default function UploadSalaryData() {
     setSelectedGroups((prev) => prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]);
   };
   const toggleAllGroups = () => {
-    setSelectedGroups((prev) => prev.length === rows.length ? [] : rows.map(groupKey));
+    setSelectedGroups((prev) => {
+      const shown = rows.map(groupKey);
+      const allShown = shown.length > 0 && shown.every((k) => prev.includes(k));
+      return allShown ? prev.filter((k) => !shown.includes(k)) : [...new Set([...prev, ...shown])];
+    });
   };
-  const groupsFromKeys = (keys) => rows
-    .filter((r) => keys.includes(groupKey(r)))
-    .map((r) => ({ establishment_id: r.establishment_id, period_month: r.period_month, period_year: r.period_year }));
+  // A group key is "<establishment id>-<month>-<year>", so ticked groups that
+  // are not in the current filter can still be turned back into groups.
+  const groupsFromKeys = (keys) => keys.map((k) => {
+    const [establishment_id, period_month, period_year] = k.split('-').map(Number);
+    return { establishment_id, period_month, period_year };
+  });
 
   // Fetches this group's individual employee records only the first time
   // it's expanded (not on every toggle) — with potentially 1000+ employees
@@ -98,11 +129,29 @@ export default function UploadSalaryData() {
     }
   };
 
+  // Deletes the ticked employee records of one establishment/period group.
+  const deleteSelectedRecords = async (key, rec) => {
+    const ids = selectedRecords[key] || [];
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} selected salary record(s) for ${rec.establishment_name} — ${MONTHS[rec.period_month]} ${rec.period_year}? This also deletes their salary slips. This cannot be undone.`)) return;
+    setBulkBusy(true);
+    try {
+      const res = await api.delete('/api/salary-data/records', { data: { ids } });
+      showResultToast(showToast, res, 'Deleted successfully!');
+      await refreshGroup(rec);
+    } catch (err) {
+      showToast(err.response?.data?.message || 'Delete failed', 'error');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const deleteGroup = async (r) => {
     if (!confirm(`Delete all ${r.slip_count} salary record(s) for ${r.establishment_name} — ${MONTHS[r.period_month]} ${r.period_year}? This also deletes their salary slips. This cannot be undone.`)) return;
     try {
       const res = await api.delete('/api/salary-data/groups', { data: { groups: groupsFromKeys([groupKey(r)]) } });
       showResultToast(showToast, res, 'Deleted successfully!');
+      setSelectedGroups((prev) => prev.filter((k) => k !== groupKey(r)));
       load();
     } catch (err) {
       showToast(err.response?.data?.message || 'Delete failed', 'error');
@@ -115,6 +164,7 @@ export default function UploadSalaryData() {
     try {
       const res = await api.delete('/api/salary-data/groups', { data: { groups: groupsFromKeys(selectedGroups) } });
       showResultToast(showToast, res, 'Deleted successfully!');
+      setSelectedGroups([]);
       load();
     } catch (err) {
       showToast(err.response?.data?.message || 'Bulk delete failed', 'error');
@@ -123,9 +173,73 @@ export default function UploadSalaryData() {
     }
   };
 
+  // Re-reads one group's employee records (and the summary totals above it)
+  // after an edit, and clears that group's ticked rows.
+  const refreshGroup = async (rec) => {
+    const key = groupKey(rec);
+    const { data } = await api.get('/api/salary-data', {
+      params: { establishment_id: rec.establishment_id, month: rec.period_month, year: rec.period_year }
+    });
+    setGroupEmployees((prev) => ({ ...prev, [key]: data }));
+    setSelectedRecords((prev) => ({ ...prev, [key]: [] }));
+    load();
+  };
+
+  const openEditRecord = (rec) => {
+    const values = {};
+    FIGURE_FIELDS.forEach(([name]) => { values[name] = rec[name] ?? ''; });
+    setEditForm(values);
+    setEditError('');
+    setEditRecord(rec);
+  };
+
+  const submitEdit = async (e) => {
+    e.preventDefault();
+    setEditError('');
+    try {
+      const res = await api.put(`/api/salary-data/${editRecord.id}`, editForm);
+      showResultToast(showToast, res, 'Salary record updated.');
+      const rec = editRecord;
+      setEditRecord(null);
+      await refreshGroup(rec);
+    } catch (err) {
+      setEditError(err.response?.data?.message || 'Save failed');
+    }
+  };
+
+  const toggleRecord = (key, id) => {
+    setSelectedRecords((prev) => {
+      const current = prev[key] || [];
+      return { ...prev, [key]: current.includes(id) ? current.filter((x) => x !== id) : [...current, id] };
+    });
+  };
+
+  // Ticks (or un-ticks) every employee currently matching this group's
+  // search, across all pages - not just the page on screen.
+  const toggleAllRecords = (key, visibleIds) => {
+    setSelectedRecords((prev) => {
+      const current = prev[key] || [];
+      const allTicked = visibleIds.length > 0 && visibleIds.every((id) => current.includes(id));
+      return {
+        ...prev,
+        [key]: allTicked ? current.filter((id) => !visibleIds.includes(id)) : [...new Set([...current, ...visibleIds])]
+      };
+    });
+  };
+
+  // Downloads this group's existing records in the import template's layout,
+  // so they can be edited in Excel and uploaded back with "Import from Excel".
+  const exportGroup = (rec) => {
+    const token = localStorage.getItem('token');
+    const params = new URLSearchParams({
+      establishment_id: rec.establishment_id, month: rec.period_month, year: rec.period_year, token
+    });
+    window.open(`${API_BASE}/api/salary-data/export?${params.toString()}`, '_blank');
+  };
+
   useEffect(() => {
-    api.get('/api/establishments').then(({ data }) => setEstablishments(data));
-    api.get('/api/employees').then(({ data }) => setEmployees(data));
+    api.get('/api/establishments/lookup').then(({ data }) => setEstablishments(data));
+    api.get('/api/employees/lookup').then(({ data }) => setEmployees(data));
     // Default to the most recently uploaded period instead of "All months"
     // across every establishment at once — /summary already sorts latest
     // period first, so its first row is exactly that. The table's own fetch
@@ -224,6 +338,7 @@ export default function UploadSalaryData() {
           <h1 className="page-title">Upload salary data</h1>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-outline" onClick={() => setArrearOpen(true)}>Arrear upload</button>
           <button className="btn btn-outline" onClick={openAdd}>Add single record</button>
         </div>
       </div>
@@ -286,7 +401,7 @@ export default function UploadSalaryData() {
           <thead>
             <tr>
               <th style={{ width: 32 }}>
-                <input type="checkbox" checked={rows.length > 0 && selectedGroups.length === rows.length} onChange={toggleAllGroups} />
+                <input type="checkbox" checked={rows.length > 0 && rows.every((r) => selectedGroups.includes(groupKey(r)))} onChange={toggleAllGroups} />
               </th>
               <th style={{ width: 24 }}></th>
               <th>Establishment</th><th>Period</th><th>No. of salary slips generated</th><th>Total net pay</th><th>Actions</th>
@@ -304,6 +419,8 @@ export default function UploadSalaryData() {
               const gPage = groupPage[key] || 1;
               const gPageSize = groupPageSize[key] || PAGE_SIZE_OPTIONS[0];
               const pagedEmployees = visibleEmployees ? visibleEmployees.slice((gPage - 1) * gPageSize, gPage * gPageSize) : visibleEmployees;
+              const selectedHere = selectedRecords[key] || [];
+              const visibleIds = visibleEmployees ? visibleEmployees.map((x) => x.id) : [];
 
               const groupRows = [
                 <tr key={key}>
@@ -328,33 +445,69 @@ export default function UploadSalaryData() {
                           <p className="muted">Loading employees...</p>
                         ) : (
                           <>
-                            <SearchAutocomplete
-                              placeholder="Employee name or ID"
-                              value={groupSearch[key] || ''}
-                              onChange={(v) => { setGroupSearch({ ...groupSearch, [key]: v }); setGroupPage({ ...groupPage, [key]: 1 }); }}
-                              options={employees}
-                              getLabel={(e) => `${e.full_name} (${e.emp_code})`}
-                              getValue={(e) => e.emp_code}
-                              getKey={(e) => e.id}
-                            />
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <SearchAutocomplete
+                                placeholder="Employee name or ID"
+                                value={groupSearch[key] || ''}
+                                onChange={(v) => { setGroupSearch({ ...groupSearch, [key]: v }); setGroupPage({ ...groupPage, [key]: 1 }); }}
+                                options={employees}
+                                getLabel={(e) => `${e.full_name} (${e.emp_code})`}
+                                getValue={(e) => e.emp_code}
+                                getKey={(e) => e.id}
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-outline btn-sm"
+                                onClick={() => exportGroup(r)}
+                                title="Same columns as the import template - edit it in Excel, then upload it back with Import from Excel"
+                              >
+                                Download as Excel
+                              </button>
+                              {canSelect && selectedHere.length > 0 && (
+                                <>
+                                  <span>{selectedHere.length} selected</span>
+                                  {canDelete && (
+                                    <button type="button" className="btn btn-outline btn-sm btn-danger-outline" disabled={bulkBusy} onClick={() => deleteSelectedRecords(key, r)}>
+                                      Delete selected ({selectedHere.length})
+                                    </button>
+                                  )}
+                                  <button type="button" className="btn btn-outline btn-sm" onClick={() => setSelectedRecords({ ...selectedRecords, [key]: [] })}>Clear</button>
+                                </>
+                              )}
+                            </div>
                             <table className="table" style={{ marginTop: 10 }}>
                               <thead>
                                 <tr>
+                                  {canSelect && (
+                                    <th style={{ width: 32 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={visibleIds.length > 0 && visibleIds.every((id) => selectedHere.includes(id))}
+                                        onChange={() => toggleAllRecords(key, visibleIds)}
+                                      />
+                                    </th>
+                                  )}
                                   <th>Employee</th><th>Net pay</th><th>Actions</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {pagedEmployees.map((e) => (
                                   <tr key={e.id}>
+                                    {canSelect && (
+                                      <td>
+                                        <input type="checkbox" checked={selectedHere.includes(e.id)} onChange={() => toggleRecord(key, e.id)} />
+                                      </td>
+                                    )}
                                     <td>{e.full_name} <span className="muted small">({e.emp_code})</span></td>
                                     <td>{formatINR(e.net_pay)}</td>
                                     <td>
+                                      {canEdit && <button className="link-btn" onClick={() => openEditRecord(e)}>Edit</button>}
                                       <button className="link-btn danger" onClick={() => removeRecord(e)}>Delete</button>
                                     </td>
                                   </tr>
                                 ))}
                                 {!visibleEmployees.length && (
-                                  <tr><td colSpan={3} className="muted">No matching employees.</td></tr>
+                                  <tr><td colSpan={canSelect ? 4 : 3} className="muted">No matching employees.</td></tr>
                                 )}
                               </tbody>
                             </table>
@@ -381,6 +534,15 @@ export default function UploadSalaryData() {
         <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={rows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
       </div>
 
+      <ArrearUpload
+        open={arrearOpen}
+        onClose={() => setArrearOpen(false)}
+        establishments={establishments}
+        employees={employees}
+        canEdit={canEdit}
+        canDelete={canDelete}
+      />
+
       {modalOpen && (
         <Modal title="Add salary record" onClose={() => setModalOpen(false)} width={760}>
           <form onSubmit={submit} className="form-grid">
@@ -395,12 +557,12 @@ export default function UploadSalaryData() {
             </div>
             <div>
               <label>Employee</label>
-              <select value={form.employee_id} onChange={(e) => setForm({ ...form, employee_id: e.target.value })} required>
-                <option value="">Select</option>
-                {employees
-                  .filter((e) => !form.establishment_id || String(e.establishment_id) === String(form.establishment_id))
-                  .map((e) => <option key={e.id} value={e.id}>{e.full_name} ({e.employee_id})</option>)}
-              </select>
+              <EmployeePicker
+                required
+                value={form.employee_id}
+                onChange={(id) => setForm({ ...form, employee_id: id })}
+                options={employees.filter((e) => !form.establishment_id || String(e.establishment_id) === String(form.establishment_id))}
+              />
             </div>
 
             <div>
@@ -415,17 +577,17 @@ export default function UploadSalaryData() {
               <input type="number" min="1000" max="9999" step="1" value={form.period_year} onChange={(e) => setForm({ ...form, period_year: e.target.value })} required />
             </div>
 
-            <div><label>Paid days</label><input type="number" step="0.5" value={form.paid_days} onChange={(e) => setForm({ ...form, paid_days: e.target.value })} /></div>
-            <div><label>Basic</label><input type="number" step="0.01" value={form.basic} onChange={(e) => setForm({ ...form, basic: e.target.value })} /></div>
-            <div><label>HRA</label><input type="number" step="0.01" value={form.hra} onChange={(e) => setForm({ ...form, hra: e.target.value })} /></div>
-            <div><label>DA</label><input type="number" step="0.01" value={form.da} onChange={(e) => setForm({ ...form, da: e.target.value })} /></div>
-            <div><label>Conveyance Allowance</label><input type="number" step="0.01" value={form.conveyance_allowance} onChange={(e) => setForm({ ...form, conveyance_allowance: e.target.value })} /></div>
-            <div><label>Overtime</label><input type="number" step="0.01" value={form.overtime} onChange={(e) => setForm({ ...form, overtime: e.target.value })} /></div>
-            <div><label>PF deduction</label><input type="number" step="0.01" value={form.pf_deduction} onChange={(e) => setForm({ ...form, pf_deduction: e.target.value })} /></div>
-            <div><label>ESI deduction</label><input type="number" step="0.01" value={form.esi_deduction} onChange={(e) => setForm({ ...form, esi_deduction: e.target.value })} /></div>
-            <div><label>P-Tax deduction</label><input type="number" step="0.01" value={form.pt_deduction} onChange={(e) => setForm({ ...form, pt_deduction: e.target.value })} /></div>
-            <div><label>TDS deduction</label><input type="number" step="0.01" value={form.tds_deduction} onChange={(e) => setForm({ ...form, tds_deduction: e.target.value })} /></div>
-            <div><label>Other deduction</label><input type="number" step="0.01" value={form.other_deduction} onChange={(e) => setForm({ ...form, other_deduction: e.target.value })} /></div>
+            <div><label>Paid days</label><input type="number" step="0.5" min="0" required value={form.paid_days} onChange={(e) => setForm({ ...form, paid_days: e.target.value })} /></div>
+            <div><label>Basic</label><input type="number" step="0.01" min="0" required value={form.basic} onChange={(e) => setForm({ ...form, basic: e.target.value })} /></div>
+            <div><label>HRA</label><input type="number" step="0.01" min="0" required value={form.hra} onChange={(e) => setForm({ ...form, hra: e.target.value })} /></div>
+            <div><label>DA</label><input type="number" step="0.01" min="0" required value={form.da} onChange={(e) => setForm({ ...form, da: e.target.value })} /></div>
+            <div><label>Conveyance Allowance</label><input type="number" step="0.01" min="0" required value={form.conveyance_allowance} onChange={(e) => setForm({ ...form, conveyance_allowance: e.target.value })} /></div>
+            <div><label>Overtime</label><input type="number" step="0.01" min="0" required value={form.overtime} onChange={(e) => setForm({ ...form, overtime: e.target.value })} /></div>
+            <div><label>PF deduction</label><input type="number" step="0.01" min="0" required value={form.pf_deduction} onChange={(e) => setForm({ ...form, pf_deduction: e.target.value })} /></div>
+            <div><label>ESI deduction</label><input type="number" step="0.01" min="0" required value={form.esi_deduction} onChange={(e) => setForm({ ...form, esi_deduction: e.target.value })} /></div>
+            <div><label>P-Tax deduction</label><input type="number" step="0.01" min="0" required value={form.pt_deduction} onChange={(e) => setForm({ ...form, pt_deduction: e.target.value })} /></div>
+            <div><label>TDS deduction</label><input type="number" step="0.01" min="0" required value={form.tds_deduction} onChange={(e) => setForm({ ...form, tds_deduction: e.target.value })} /></div>
+            <div><label>Other deduction</label><input type="number" step="0.01" min="0" required value={form.other_deduction} onChange={(e) => setForm({ ...form, other_deduction: e.target.value })} /></div>
 
             <div className="span-2 modal-actions">
               <button type="button" className="btn btn-outline" onClick={() => setModalOpen(false)}>Cancel</button>
@@ -434,6 +596,36 @@ export default function UploadSalaryData() {
           </form>
         </Modal>
       )}
+
+      {editRecord && (
+        <Modal
+          title={`Edit salary record — ${editRecord.full_name} (${editRecord.emp_code}) — ${MONTHS[editRecord.period_month]} ${editRecord.period_year}`}
+          onClose={() => setEditRecord(null)}
+          width={760}
+        >
+          <form onSubmit={submitEdit} className="form-grid">
+            {editError && <div className="alert alert-error span-2">{editError}</div>}
+            {FIGURE_FIELDS.map(([name, label]) => (
+              <div key={name}>
+                <label>{label}</label>
+                <input
+                  type="number"
+                  step={name === 'paid_days' ? '0.5' : '0.01'}
+                  min="0"
+                  required
+                  value={editForm[name]}
+                  onChange={(e) => setEditForm({ ...editForm, [name]: e.target.value })}
+                />
+              </div>
+            ))}
+            <div className="span-2 modal-actions">
+              <button type="button" className="btn btn-outline" onClick={() => setEditRecord(null)}>Cancel</button>
+              <button className="btn btn-primary">Save changes</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
     </Layout>
   );
 }

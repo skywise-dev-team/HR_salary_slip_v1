@@ -3,7 +3,7 @@ const asyncRouter = require('../utils/asyncRouter');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
-const { requireAuth, getPermissionsMap, ensureEmployeeRole } = require('../middleware/auth');
+const { requireAuth, getPermissionsMap, ensureEmployeeRole, salarySlipAccessFor } = require('../middleware/auth');
 const { logActivity, logLogin } = require('../utils/activityLog');
 const { checkStaffNetwork, rejectStaffNetwork } = require('../utils/networkAccess');
 
@@ -20,7 +20,7 @@ async function completeStaffLogin(user, req, res) {
   if (!network.allowed) return rejectStaffNetwork(res, network.ip, user.user_id);
 
   const token = jwt.sign({ id: user.id, source: 'user' }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '30m'
+    expiresIn: process.env.JWT_EXPIRES_IN || '90m'
   });
   const permissions = await getPermissionsMap(user.role_id, user.role_name);
   const allowedModules = Object.keys(permissions).filter((key) => permissions[key].view);
@@ -38,9 +38,9 @@ async function completeStaffLogin(user, req, res) {
       userId: user.user_id,
       email: user.email,
       role: user.role_name,
-      // Every users-table (staff) account always has full Salary Slips
-      // access — a fixed policy, not a per-account setting.
-      salarySlipAccess: 'VIEW_DOWNLOAD',
+      canApprove: !!user.can_approve,
+      // From the role's own Salary Slips entry in Roles & Permissions.
+      salarySlipAccess: salarySlipAccessFor(permissions),
       mustChangePassword: !!user.must_change_password,
       allowedModules,
       permissions
@@ -61,7 +61,7 @@ async function completeEmployeeLogin(emp, res) {
   // logged in. Looking the row up fresh by employee_id on every request
   // (see requireAuth) closes that off entirely.
   const token = jwt.sign({ employeeId: emp.employee_id, source: 'employee' }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '30m'
+    expiresIn: process.env.JWT_EXPIRES_IN || '90m'
   });
   const permissions = await getPermissionsMap(roleId, 'Employee');
   const allowedModules = Object.keys(permissions).filter((key) => permissions[key].view);
@@ -107,7 +107,7 @@ router.post('/login', async (req, res) => {
     if (accountType !== 'staff' && accountType !== 'employee') {
       return res.json({
         needsAccountType: true,
-        message: 'This ID is used by both a staff account and an employee account. Please choose which one to log into.'
+        message: 'This ID is used by both an HR account and an employee account. Please choose which one to log into.'
       });
     }
     if (accountType === 'staff') {
@@ -151,6 +151,7 @@ router.get('/me', requireAuth, async (req, res) => {
       fullName: req.user.fullName,
       email: req.user.email,
       role: req.user.roleName,
+      canApprove: !!req.user.canApprove,
       salarySlipAccess: req.user.salarySlipAccess,
       mustChangePassword: req.user.mustChangePassword,
       allowedModules,

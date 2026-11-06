@@ -85,10 +85,10 @@ function checkStaffNetwork(req) {
 // request), so telling them their own address back leaks nothing — and it
 // makes a misconfigured list or proxy setting obvious on the spot.
 function rejectStaffNetwork(res, ip, who) {
-  console.warn(`[network] Refused staff access from ${ip || 'unknown address'}${who ? ` (account ${who})` : ''}`);
+  console.warn(`[network] Refused HR access from ${ip || 'unknown address'}${who ? ` (account ${who})` : ''}`);
   return res.status(403).json({
     code: 'NETWORK_RESTRICTED',
-    message: `Staff accounts can only be used from the office network. Your current connection (${ip || 'unknown address'}) is not on it.`
+    message: `HR accounts can only be used from the office network. Your current connection (${ip || 'unknown address'}) is not on it.`
   });
 }
 
@@ -96,12 +96,12 @@ function rejectStaffNetwork(res, ip, who) {
 function logNetworkRestrictionStatus() {
   const cfg = getConfig();
   if (!cfg.enabled) {
-    console.log('Staff network restriction: OFF (ALLOWED_STAFF_IPS is not set — staff can log in from anywhere)');
+    console.log('HR network restriction: OFF (ALLOWED_STAFF_IPS is not set — HR can log in from anywhere)');
     return;
   }
-  console.log(`Staff network restriction: ON (${cfg.count - cfg.invalid.length} valid rule(s))`);
+  console.log(`HR network restriction: ON (${cfg.count - cfg.invalid.length} valid rule(s))`);
   if (cfg.invalid.length) {
-    console.warn(`Staff network restriction: IGNORED invalid ALLOWED_STAFF_IPS entr(y/ies): ${cfg.invalid.join(', ')}`);
+    console.warn(`HR network restriction: IGNORED invalid ALLOWED_STAFF_IPS entr(y/ies): ${cfg.invalid.join(', ')}`);
   }
 }
 

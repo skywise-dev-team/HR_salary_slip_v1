@@ -53,7 +53,6 @@ export default function ChangePassword() {
       <div className="card" style={{ maxWidth: 420 }}>
         <form onSubmit={submit} className="form-grid" style={{ gridTemplateColumns: '1fr' }}>
           {error && <div className="alert alert-error">{error}</div>}
-          {forced && <div className="alert alert-info">Your current password is the one you were given to sign in with.</div>}
 
           <div>
             <label>Current password</label>

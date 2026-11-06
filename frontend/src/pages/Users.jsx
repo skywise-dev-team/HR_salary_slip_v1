@@ -5,6 +5,8 @@ import PasswordInput from '../components/PasswordInput.jsx';
 import { Toggle, StatusBadge } from '../components/Toggle.jsx';
 import SearchAutocomplete from '../components/SearchAutocomplete.jsx';
 import Pagination from '../components/Pagination.jsx';
+import ApproverPicker from '../components/ApproverPicker.jsx';
+import EstablishmentPicker from '../components/EstablishmentPicker.jsx';
 import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -13,12 +15,15 @@ import { streamImport } from '../utils/importProgress.js';
 import { showResultToast } from '../utils/approvalToast.js';
 import { API_BASE } from '../config/apiBase.js';
 
-const EMPTY = { user_id: '', password: '', email: '', role_id: '', can_approve: false };
+const EMPTY = { user_id: '', password: '', email: '', role_id: '', can_approve: false, all_establishments: false, establishment_ids: [] };
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
 
 export default function Users() {
   const [rows, setRows] = useState([]);
   const [roles, setRoles] = useState([]);
+  // The Employee role is automatic for Employee Master logins - never assigned to a user.
+  const assignableRoles = roles.filter((r) => r.role_name !== 'Employee');
+  const [establishments, setEstablishments] = useState([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
@@ -29,6 +34,8 @@ export default function Users() {
   const { showToast } = useToast();
   const { isAdmin } = useAuth();
   const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState([]);
+  const [estFilter, setEstFilter] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkRoleId, setBulkRoleId] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -36,11 +43,27 @@ export default function Users() {
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
 
   const load = () => api.get('/api/users').then(({ data }) => setRows(data));
-  useEffect(() => { load(); api.get('/api/roles').then(({ data }) => setRoles(data)); }, []);
-  useEffect(() => { setPage(1); }, [search]);
+  useEffect(() => {
+    load();
+    api.get('/api/roles').then(({ data }) => setRoles(data));
+    api.get('/api/establishments').then(({ data }) => setEstablishments(data)).catch(() => setEstablishments([]));
+  }, []);
+
+  // How a user's establishment access reads in the list and the details window.
+  const accessLabel = (row) => {
+    const names = establishments.filter((e) => (row.establishment_ids || []).includes(e.id)).map((e) => e.name);
+    if (row.role_name === 'Admin') return (row.all_establishments || !names.length) ? 'All (Admin)' : (names.length <= 2 ? names.join(', ') : `${names.length} establishments`);
+    if (row.all_establishments) return 'All establishments';
+    if (!names.length) return 'None';
+    return names.length <= 2 ? names.join(', ') : `${names.length} establishments`;
+  };
+  const accessTitle = (row) => (row.all_establishments || (row.role_name === 'Admin' && !(row.establishment_ids || []).length)
+    ? 'All establishments'
+    : establishments.filter((e) => (row.establishment_ids || []).includes(e.id)).map((e) => e.name).join(', '));
+  useEffect(() => { setPage(1); }, [search, roleFilter, estFilter]);
 
   const openAdd = () => { setEditing(null); setForm(EMPTY); setError(''); setModalOpen(true); };
-  const openEdit = (row) => { setEditing(row); setForm({ ...row, password: '' }); setError(''); setModalOpen(true); };
+  const openEdit = (row) => { setEditing(row); setForm({ ...row, password: '', all_establishments: !!row.all_establishments, establishment_ids: row.establishment_ids || [] }); setError(''); setModalOpen(true); };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -140,16 +163,21 @@ export default function Users() {
     }
   };
 
-  const filteredRows = search.trim()
-    ? rows.filter((r) => {
-        const needle = search.trim().toLowerCase();
-        return r.user_id.toLowerCase().includes(needle) || (r.email || '').toLowerCase().includes(needle);
-      })
-    : rows;
+  const hasAllAccess = (r) => !!r.all_establishments || (r.role_name === 'Admin' && !(r.establishment_ids || []).length);
+  const filteredRows = rows.filter((r) => {
+    const needle = search.trim().toLowerCase();
+    if (needle && !(r.user_id.toLowerCase().includes(needle) || (r.email || '').toLowerCase().includes(needle))) return false;
+    if (roleFilter.length && !roleFilter.includes(r.role_id)) return false;
+    if (estFilter.length && !(hasAllAccess(r) || (r.establishment_ids || []).some((id) => estFilter.includes(id)))) return false;
+    return true;
+  });
 
   const toggleOne = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const allSelected = filteredRows.length > 0 && filteredRows.every((r) => selectedIds.includes(r.id));
-  const toggleAll = () => setSelectedIds(allSelected ? [] : filteredRows.map((r) => r.id));
+  const toggleAll = () => setSelectedIds((ids) => {
+    const shown = filteredRows.map((r) => r.id);
+    return allSelected ? ids.filter((id) => !shown.includes(id)) : [...new Set([...ids, ...shown])];
+  });
   const pagedRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
 
   const bulkSetStatus = async (status) => {
@@ -253,6 +281,33 @@ export default function Users() {
           getValue={(r) => r.user_id}
           getKey={(r) => r.id}
         />
+        <div style={{ minWidth: 220 }}>
+          <ApproverPicker
+            floating
+            options={roles.map((r) => ({ id: r.id, label: r.role_name }))}
+            value={roleFilter}
+            onChange={setRoleFilter}
+            placeholder="All roles"
+            searchPlaceholder="Search role"
+            noun="roles"
+            emptyText="No roles found."
+          />
+        </div>
+        <div style={{ minWidth: 260 }}>
+          <ApproverPicker
+            floating
+            options={establishments.map((e) => ({ id: e.id, label: e.name }))}
+            value={estFilter}
+            onChange={setEstFilter}
+            placeholder="All establishments"
+            searchPlaceholder="Search establishment"
+            noun="establishments"
+            emptyText="No establishments found."
+          />
+        </div>
+        {(roleFilter.length > 0 || estFilter.length > 0) && (
+          <button className="link-btn" onClick={() => { setRoleFilter([]); setEstFilter([]); }}>Clear filters</button>
+        )}
       </div>
 
       {selectedIds.length > 0 && (
@@ -262,7 +317,7 @@ export default function Users() {
           <button className="btn btn-outline btn-sm" disabled={bulkBusy} onClick={() => bulkSetStatus('INACTIVE')}>Deactivate</button>
           <select value={bulkRoleId} onChange={(e) => setBulkRoleId(e.target.value)} style={{ maxWidth: 180 }}>
             <option value="">Set role to...</option>
-            {roles.map((r) => <option key={r.id} value={r.id}>{r.role_name}</option>)}
+            {assignableRoles.map((r) => <option key={r.id} value={r.id}>{r.role_name}</option>)}
           </select>
           <button className="btn btn-outline btn-sm" disabled={bulkBusy || !bulkRoleId} onClick={bulkSetRole}>Apply role</button>
           <button className="btn btn-outline btn-sm btn-danger-outline" disabled={bulkBusy} onClick={bulkDelete}>Delete selected</button>
@@ -275,7 +330,7 @@ export default function Users() {
           <thead>
             <tr>
               <th style={{ width: 32 }}><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
-              <th>User ID</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th>
+              <th>User ID</th><th>Email</th><th>Role</th><th>Establishments</th><th>Status</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -285,6 +340,7 @@ export default function Users() {
                 <td>{r.user_id}</td>
                 <td>{r.email || '-'}</td>
                 <td>{r.role_name}</td>
+                <td title={accessTitle(r)}>{accessLabel(r)}</td>
                 <td>
                   <div className="toggle-cell">
                     <Toggle checked={r.status === 'ACTIVE'} onChange={() => toggleStatus(r)} />
@@ -299,7 +355,7 @@ export default function Users() {
                 </td>
               </tr>
             ))}
-            {!filteredRows.length && <tr><td colSpan={6} className="muted">{search ? 'No matching users.' : 'No users yet.'}</td></tr>}
+            {!filteredRows.length && <tr><td colSpan={7} className="muted">{(search || roleFilter.length || estFilter.length) ? 'No matching users.' : 'No users yet.'}</td></tr>}
           </tbody>
         </table>
         <Pagination page={page} setPage={setPage} pageSize={pageSize} setPageSize={setPageSize} totalItems={filteredRows.length} pageSizeOptions={PAGE_SIZE_OPTIONS} />
@@ -319,7 +375,6 @@ export default function Users() {
                 required
                 disabled={!!editing}
               />
-              <small className="hint">Letters and numbers only.</small>
             </div>
             <div>
               <label>{editing ? 'New password (optional)' : 'Password'}</label>
@@ -328,29 +383,44 @@ export default function Users() {
 
             <div>
               <label>Email</label>
-              <input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} required />
+              <input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} />
             </div>
             <div className="span-2">
               <label>Role</label>
               <select value={form.role_id} onChange={(e) => setForm({ ...form, role_id: e.target.value })} required>
                 <option value="">Select role</option>
-                {roles.map((r) => <option key={r.id} value={r.id}>{r.role_name}</option>)}
+                {assignableRoles.map((r) => <option key={r.id} value={r.id}>{r.role_name}</option>)}
               </select>
             </div>
 
-            {roles.find((r) => String(r.id) === String(form.role_id))?.role_name === 'Admin' && (
+            {form.role_id && (
               <div className="span-2">
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <input
                     type="checkbox"
                     checked={editing?.user_id === 'admin' ? true : !!form.can_approve}
                     disabled={editing?.user_id === 'admin'}
+                    style={{ width: 16, height: 16, flex: '0 0 16px' }}
                     onChange={(e) => setForm({ ...form, can_approve: e.target.checked })}
                   />
-                  Can approve (eligible to be assigned specific approval tasks)
+                  Can approve (can be chosen as an approver in Approval Routing, for the establishments this user has access to)
                 </label>
               </div>
             )}
+
+            {(() => {
+              const isAdminRole = roles.find((r) => String(r.id) === String(form.role_id))?.role_name === 'Admin';
+              return (
+              <div className="span-2">
+                <label>{isAdminRole ? 'Establishments for approval requests' : 'Establishment access'}</label>
+                <EstablishmentPicker
+                  options={establishments}
+                  value={{ all: !!form.all_establishments || (isAdminRole && !(form.establishment_ids || []).length), ids: form.establishment_ids || [] }}
+                  onChange={(v) => setForm({ ...form, all_establishments: v.all, establishment_ids: v.ids })}
+                />
+              </div>
+              );
+            })()}
 
             <div className="span-2 modal-actions">
               <button type="button" className="btn btn-outline" onClick={() => setModalOpen(false)}>Cancel</button>
@@ -366,6 +436,7 @@ export default function Users() {
             <div><span>User ID</span><span>{viewing.user_id}</span></div>
             <div><span>Email</span><span>{viewing.email || '-'}</span></div>
             <div><span>Role</span><span>{viewing.role_name}</span></div>
+            <div><span>Establishments</span><span>{accessTitle(viewing) || 'None'}</span></div>
             <div><span>Status</span><span><StatusBadge status={viewing.status} /></span></div>
           </div>
         </Modal>

@@ -1,8 +1,25 @@
 -- =========================================================
--- Salary Slip System — MySQL schema
--- (reordered + small fixes from the original hr_schema.sql so that
---  foreign keys resolve. Manage Access uses a View/Edit/Delete
---  matrix — no separate Create permission.)
+-- Salary Slip Register — MySQL schema (final, complete)
+--
+-- A single, current snapshot: run it once on a fresh MySQL / MariaDB server
+-- (npm run migrate) and every table below is created. Nothing else is needed
+-- for a new install.
+--
+-- Already running an older database? You do not re-run this file. Only add
+-- what is missing, from the migration_*.sql files in this folder, for example:
+--   ALTER TABLE employees ADD COLUMN inactive_date DATE DEFAULT NULL AFTER active_from;
+--
+-- Notes on the data model:
+--  * Salary slips are never stored. Each PDF is generated on demand from
+--    salary_data / arrear_data plus the effective-dated details in
+--    employee_versions and establishment_versions.
+--  * employee_versions / establishment_versions keep every saved change
+--    exactly as it was saved. When a slip is built, of the versions whose
+--    effective_from is on or before the slip's date, the one SAVED most
+--    recently (created_at) is used. A monthly slip uses the last day of the
+--    pay month; an arrear slip uses its date of issue.
+--  * employee_change_log is the audit trail shown by "History" and the
+--    employee Excel export.
 -- =========================================================
 
 CREATE DATABASE IF NOT EXISTS salary_slip;
@@ -52,6 +69,9 @@ CREATE TABLE IF NOT EXISTS users (
   -- accounts; always true, unchangeably, for the one protected admin
   -- account (enforced in code, not here).
   can_approve         TINYINT(1) NOT NULL DEFAULT 0,
+  -- 1 = access to every establishment (also future ones); 0 = only those listed
+  -- in user_establishments. Never applies to the Admin role.
+  all_establishments  TINYINT(1) NOT NULL DEFAULT 0,
   created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_user_role FOREIGN KEY (role_id) REFERENCES roles(id)
@@ -70,10 +90,12 @@ CREATE TABLE IF NOT EXISTS activity_log (
   user_id      INT DEFAULT NULL,          -- FK to users.id; NULL-able so deleting an account never deletes its history
   performed_by VARCHAR(60) NOT NULL,      -- snapshot of their login ID at the time — stays readable even after the account is deleted
   role_name    VARCHAR(40) NOT NULL,      -- snapshot of their role at the time
-  action       VARCHAR(20) NOT NULL,      -- LOGIN, CREATE, UPDATE, DELETE, IMPORT, STATUS_CHANGE, PASSWORD_RESET, PASSWORD_CHANGE
+  action       VARCHAR(20) NOT NULL,      -- LOGIN, CREATE, UPDATE, DELETE, IMPORT, STATUS_CHANGE, PASSWORD_RESET, PASSWORD_CHANGE, APP_ACCESS
   module_key   VARCHAR(40) DEFAULT NULL,  -- employees, users, establishments, upload_salary, salary_slips, roles_permissions — NULL for LOGIN/PASSWORD_CHANGE
   description  VARCHAR(255) NOT NULL,
+  establishment_id INT DEFAULT NULL,      -- the establishment this entry is about, when there is one
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_activity_log_est (establishment_id),
   KEY idx_activity_log_user (user_id),
   KEY idx_activity_log_created (created_at),
   CONSTRAINT fk_activity_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
@@ -91,7 +113,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 CREATE TABLE IF NOT EXISTS approval_requests (
   id                  INT AUTO_INCREMENT PRIMARY KEY,
   module_key          VARCHAR(40) NOT NULL,        -- employees, users, upload_salary
-  action              VARCHAR(20) NOT NULL,        -- CREATE, UPDATE, DELETE, IMPORT
+  action              VARCHAR(20) NOT NULL,        -- CREATE, UPDATE, DELETE, IMPORT, APP_ACCESS, BULK_APP_ACCESS (+ the bulk / arrear variants; max 20 characters)
   requested_by        INT DEFAULT NULL,            -- FK to users.id; NULL-able so deleting an account never deletes request history
   requested_by_name   VARCHAR(60) NOT NULL,        -- snapshot of their login ID at the time
   requested_by_email  VARCHAR(150),                -- snapshot of their email at the time — the approval email is sent FROM this address
@@ -116,6 +138,14 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   -- before this behavior existed, and is still treated as "visible to
   -- every Admin" for that older data, never assigned to a new request.
   visible_to          JSON DEFAULT NULL,
+  -- Why the requester is making the change (required for every request) and
+  -- the "what changes" view shown to the approver - see utils/approvalDetails.js.
+  request_reason      VARCHAR(500) DEFAULT NULL,
+  change_details      JSON DEFAULT NULL,
+  -- The establishment(s) the request is about (JSON array of establishments.id),
+  -- worked out when it is created. An approver only sees a request if they have
+  -- access to all of them. NULL = not tied to an establishment (e.g. a Users request).
+  establishment_ids   JSON DEFAULT NULL,
   KEY idx_approval_status (status),
   KEY idx_approval_requested_by (requested_by),
   CONSTRAINT fk_approval_requested_by FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL,
@@ -187,13 +217,15 @@ CREATE TABLE IF NOT EXISTS employees (
   uan                   VARCHAR(15),
   bank_account_no       VARCHAR(30),
   establishment_id      INT NOT NULL,
-  active_from           DATE,
+  active_from           DATE,                -- no salary, arrear, issue or effective date may be before this; none may be after today
+  inactive_date         DATE DEFAULT NULL,   -- the day the employee became Inactive; NULL while active
   status                ENUM('ACTIVE','INACTIVE') NOT NULL DEFAULT 'ACTIVE',
-  -- App login fields, added for Employee Master-provisioned logins: an
-  -- employee's own app access now lives directly on this table instead of
-  -- a separate users row. app_access is kept in sync with `status` by the
-  -- quick Active/Inactive toggle (Active -> YES, Inactive -> NO), but can
-  -- also be set independently via the Add/Edit form and bulk import.
+  -- App login fields: an employee's own app access lives directly on this
+  -- table (no separate users row). Turn it on / off from the App Access toggle
+  -- in the list (single or bulk), the Add/Edit form, or a bulk import. Turning
+  -- it on sets the password to the Employee ID and Salary slip access to
+  -- VIEW_ONLY. An INACTIVE employee can never have app access. Active /
+  -- Inactive itself is changed only from the Edit form (with its date).
   email                 VARCHAR(150) DEFAULT NULL,
   password_hash         VARCHAR(255) DEFAULT NULL,
   app_access            ENUM('YES','NO') NOT NULL DEFAULT 'NO',
@@ -268,6 +300,99 @@ CREATE TABLE IF NOT EXISTS salary_data (
   CONSTRAINT fk_sd_emp  FOREIGN KEY (employee_id) REFERENCES employees(id),
   CONSTRAINT fk_sd_user FOREIGN KEY (uploaded_by) REFERENCES users(id),
   UNIQUE KEY uq_est_period_emp (establishment_id, period_month, period_year, employee_id)
+) ENGINE=InnoDB;
+
+-- Which establishments a user (other than an Admin, or one with
+-- users.all_establishments = 1) may work with. No rows = no access.
+CREATE TABLE IF NOT EXISTS user_establishments (
+  user_id           INT NOT NULL,
+  establishment_id  INT NOT NULL,
+  PRIMARY KEY (user_id, establishment_id),
+  CONSTRAINT fk_ue_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_ue_est  FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Arrear salary records (see migration_add_arrear_data.sql).
+CREATE TABLE IF NOT EXISTS arrear_data (
+  id                INT AUTO_INCREMENT PRIMARY KEY,
+  establishment_id  INT NOT NULL,
+  employee_id       INT NOT NULL,
+  arrear_from_month      TINYINT NOT NULL,
+  arrear_from_year       SMALLINT NOT NULL,
+  arrear_to_month        TINYINT NOT NULL,
+  arrear_to_year         SMALLINT NOT NULL,
+  date_of_issue          DATE DEFAULT NULL,   -- after the 'to' month, never after today; the employee details printed are those in force on this date
+  paid_days         DECIMAL(4,2) DEFAULT 0,
+  basic             DECIMAL(12,2) DEFAULT 0,
+  hra               DECIMAL(12,2) DEFAULT 0,
+  da                DECIMAL(12,2) DEFAULT 0,
+  conveyance_allowance DECIMAL(12,2) DEFAULT 0,
+  overtime          DECIMAL(12,2) DEFAULT 0,
+  gross_earnings    DECIMAL(12,2) DEFAULT 0,
+  pf_deduction      DECIMAL(12,2) DEFAULT 0,
+  esi_deduction     DECIMAL(12,2) DEFAULT 0,
+  pt_deduction      DECIMAL(12,2) DEFAULT 0,
+  tds_deduction     DECIMAL(12,2) DEFAULT 0,
+  other_deduction   DECIMAL(12,2) DEFAULT 0,
+  total_deduction   DECIMAL(12,2) DEFAULT 0,
+  net_pay           DECIMAL(12,2) DEFAULT 0,
+  slip_snapshot     JSON DEFAULT NULL,
+  uploaded_by       INT,
+  uploaded_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_ar_est  FOREIGN KEY (establishment_id) REFERENCES establishments(id),
+  CONSTRAINT fk_ar_emp  FOREIGN KEY (employee_id) REFERENCES employees(id),
+  CONSTRAINT fk_ar_user FOREIGN KEY (uploaded_by) REFERENCES users(id),
+  UNIQUE KEY uq_arrear (establishment_id, employee_id, arrear_from_month, arrear_from_year, arrear_to_month, arrear_to_year)
+) ENGINE=InnoDB;
+
+-- Effective-dated employee and establishment details (see migration_add_effective_dating.sql).
+CREATE TABLE IF NOT EXISTS employee_versions (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  employee_id      INT NOT NULL,
+  effective_from   DATE NOT NULL,
+  full_name        VARCHAR(100),
+  relative_name    VARCHAR(100),
+  relation         VARCHAR(20),
+  designation      VARCHAR(60),
+  uan              VARCHAR(15),
+  bank_account_no  VARCHAR(30),
+  created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,   -- when this version was SAVED; the newest one wins (see header)
+  UNIQUE KEY uq_emp_version (employee_id, effective_from),
+  CONSTRAINT fk_empver_emp FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS establishment_versions (
+  id                INT AUTO_INCREMENT PRIMARY KEY,
+  establishment_id  INT NOT NULL,
+  effective_from    DATE NOT NULL,
+  name              VARCHAR(150),
+  address           VARCHAR(255),
+  signatory_name    VARCHAR(100),
+  logo_path         VARCHAR(255),
+  signature_path    VARCHAR(255),
+  created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,   -- when this version was SAVED; the newest one wins
+  UNIQUE KEY uq_est_version (establishment_id, effective_from),
+  CONSTRAINT fk_estver_est FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Employee Master change history (see migration_add_employee_change_log.sql).
+CREATE TABLE IF NOT EXISTS employee_change_log (
+  id              INT AUTO_INCREMENT PRIMARY KEY,
+  employee_id     INT DEFAULT NULL,
+  employee_code   VARCHAR(40) NOT NULL,
+  employee_name   VARCHAR(100) DEFAULT NULL,
+  action          VARCHAR(20) NOT NULL,
+  field_name      VARCHAR(60) NOT NULL,
+  old_value       VARCHAR(255) DEFAULT NULL,
+  new_value       VARCHAR(255) DEFAULT NULL,
+  effective_from  DATE DEFAULT NULL,
+  changed_by      VARCHAR(60) NOT NULL,
+  changed_by_role VARCHAR(40) DEFAULT NULL,
+  approved_by     VARCHAR(60) DEFAULT NULL,
+  changed_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_ecl_employee (employee_id),
+  KEY idx_ecl_code (employee_code),
+  KEY idx_ecl_changed_at (changed_at)
 ) ENGINE=InnoDB;
 
 SET FOREIGN_KEY_CHECKS = 1;

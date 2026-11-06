@@ -3,7 +3,8 @@ const asyncRouter = require('../utils/asyncRouter');
 const archiver = require('archiver');
 const pool = require('../config/db');
 const { requireAuth, requirePermission, requireNotPendingPasswordChange } = require('../middleware/auth');
-const { generateSlipBuffer } = require('../utils/slipService');
+const { generateSlipBuffer, generateArrearSlipBuffer } = require('../utils/slipService');
+const { addScope, allowEstablishment } = require('../utils/establishmentScope');
 
 const router = asyncRouter();
 router.use(requireAuth);
@@ -67,12 +68,45 @@ function restrictToOwn(where, params, ownEmployeeId) {
   };
 }
 
+// Appends the establishment limit of a staff account (see
+// utils/establishmentScope.js) to a WHERE clause, so slips of establishments
+// the account has no access to never appear in a list, preview or download.
+function restrictToScope(req, where, params) {
+  const clauses = [];
+  const extra = [];
+  addScope(req, clauses, extra, 'sd.establishment_id');
+  if (!clauses.length) return { where, params };
+  return {
+    where: where ? `${where} AND ${clauses.join(' AND ')}` : `WHERE ${clauses.join(' AND ')}`,
+    params: [...params, ...extra]
+  };
+}
+
 router.get('/', requirePermission('salary_slips', 'view'), async (req, res) => {
   const filtered = buildFilters(req.query);
   const ownEmployeeId = resolveOwnEmployeeId(req);
-  const { where, params } = restrictToOwn(filtered.where, filtered.params, ownEmployeeId);
+  const own = restrictToOwn(filtered.where, filtered.params, ownEmployeeId);
+  const { where, params } = restrictToScope(req, own.where, own.params);
   const [rows] = await pool.query(`${LIST_SQL} ${where} ORDER BY sd.uploaded_at DESC`, params);
   res.json(rows);
+});
+
+// The most recent pay period that has any salary data at all — what the
+// Salary Slips page opens on. An employee login only ever sees its own
+// latest period. Returns null when nothing has been uploaded yet.
+router.get('/latest-period', requirePermission('salary_slips', 'view'), async (req, res) => {
+  const ownEmployeeId = resolveOwnEmployeeId(req);
+  const clauses = [];
+  const params = [];
+  if (ownEmployeeId) { clauses.push('employee_id = ?'); params.push(ownEmployeeId); }
+  addScope(req, clauses, params, 'establishment_id');
+  const [[row]] = await pool.query(
+    `SELECT period_month, period_year FROM salary_data
+     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+     ORDER BY period_year DESC, period_month DESC LIMIT 1`,
+    params
+  );
+  res.json(row || null);
 });
 
 // Inline preview — for anyone with salary_slips view access, except
@@ -82,8 +116,9 @@ router.get('/:id/preview', requirePermission('salary_slips', 'view'), async (req
   if (req.user.salarySlipAccess === 'NO_ACCESS') {
     return res.status(403).json({ message: 'You do not have access to salary slips' });
   }
-  const [[sd]] = await pool.query('SELECT id, employee_id FROM salary_data WHERE id = ?', [req.params.id]);
+  const [[sd]] = await pool.query('SELECT id, employee_id, establishment_id FROM salary_data WHERE id = ?', [req.params.id]);
   if (!sd) return res.status(404).json({ message: 'Salary slip not found' });
+  if (!allowEstablishment(req, res, sd.establishment_id, 'You do not have access to this establishment\'s salary slips.')) return;
 
   const ownEmployeeId = resolveOwnEmployeeId(req);
   if (ownEmployeeId && sd.employee_id !== ownEmployeeId) {
@@ -105,12 +140,13 @@ router.get('/:id/download', requirePermission('salary_slips', 'view'), async (re
     return res.status(403).json({ message: 'Your account is not permitted to download salary slips' });
   }
   const [[sd]] = await pool.query(
-    `SELECT sd.id, sd.employee_id, sd.period_month, sd.period_year, e.employee_id AS emp_code, e.full_name
+    `SELECT sd.id, sd.employee_id, sd.establishment_id, sd.period_month, sd.period_year, e.employee_id AS emp_code, e.full_name
      FROM salary_data sd JOIN employees e ON e.id = sd.employee_id
      WHERE sd.id = ?`,
     [req.params.id]
   );
   if (!sd) return res.status(404).json({ message: 'Salary slip not found' });
+  if (!allowEstablishment(req, res, sd.establishment_id, 'You do not have access to this establishment\'s salary slips.')) return;
 
   const ownEmployeeId = resolveOwnEmployeeId(req);
   if (ownEmployeeId && sd.employee_id !== ownEmployeeId) {
@@ -154,11 +190,13 @@ router.get('/bulk-download', requirePermission('salary_slips', 'view'), async (r
     const ids = String(req.query.ids).split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
     if (!ids.length) return res.status(400).json({ message: 'No valid slip ids provided' });
     const placeholders = ids.map(() => '?').join(',');
-    const { where, params } = restrictToOwn(`WHERE sd.id IN (${placeholders})`, ids, ownEmployeeId);
+    const own = restrictToOwn(`WHERE sd.id IN (${placeholders})`, ids, ownEmployeeId);
+    const { where, params } = restrictToScope(req, own.where, own.params);
     [rows] = await pool.query(`${LIST_SQL} ${where} ORDER BY es.name, e.full_name`, params);
   } else {
     const filtered = buildFilters(req.query);
-    const { where, params } = restrictToOwn(filtered.where, filtered.params, ownEmployeeId);
+    const own = restrictToOwn(filtered.where, filtered.params, ownEmployeeId);
+    const { where, params } = restrictToScope(req, own.where, own.params);
     [rows] = await pool.query(`${LIST_SQL} ${where} ORDER BY es.name, e.full_name`, params);
   }
 
@@ -200,6 +238,123 @@ router.get('/bulk-download', requirePermission('salary_slips', 'view'), async (r
     pool.query(`UPDATE salary_data SET downloaded = 1 WHERE id IN (${placeholders2})`, salaryDataIds)
       .catch((err) => console.error('Failed to set salary_data.downloaded flag:', err.message));
   }
+});
+
+// ===========================================================================
+// ARREAR SLIPS — same rules as the monthly slips above (same salary_slips
+// permission, VIEW_ONLY can only preview, VIEW_DOWNLOAD can also download,
+// an employee login only sees its own, establishment limits apply) and the
+// same real-time behaviour: every preview/download is generated fresh from
+// the arrear record and nothing is ever saved on the server.
+// ===========================================================================
+const ARREAR_LIST_SQL = `
+  SELECT a.id, a.establishment_id, a.employee_id,
+         a.arrear_from_month, a.arrear_from_year, a.arrear_to_month, a.arrear_to_year,
+         DATE_FORMAT(a.date_of_issue, '%d-%m-%Y') AS date_of_issue_text,
+         a.net_pay, a.uploaded_at,
+         e.employee_id AS emp_code, e.full_name, es.name AS establishment_name
+  FROM arrear_data a
+  JOIN employees e ON e.id = a.employee_id
+  JOIN establishments es ON es.id = a.establishment_id`;
+
+// month / year here mean the FIRST month of the arrear period.
+function arrearWhere(req) {
+  const { establishment_id, month, year, search } = req.query;
+  const clauses = [];
+  const params = [];
+  if (establishment_id) { clauses.push('a.establishment_id = ?'); params.push(establishment_id); }
+  if (month) { clauses.push('a.arrear_from_month = ?'); params.push(month); }
+  if (year) { clauses.push('a.arrear_from_year = ?'); params.push(year); }
+  if (search) { clauses.push('(e.employee_id LIKE ? OR e.full_name LIKE ?)'); params.push(`%${search}%`, `%${search}%`); }
+  const own = resolveOwnEmployeeId(req);
+  if (own) { clauses.push('a.employee_id = ?'); params.push(own); }
+  addScope(req, clauses, params, 'a.establishment_id');
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+function arrearDownloadName(fullName, empCode, r) {
+  return `${sanitizeName(fullName)}_${sanitizeName(empCode)}_Arrear_${MONTHS[r.arrear_from_month]}-${r.arrear_from_year}_to_${MONTHS[r.arrear_to_month]}-${r.arrear_to_year}.pdf`;
+}
+
+router.get('/arrear', requirePermission('salary_slips', 'view'), async (req, res) => {
+  if (req.user.salarySlipAccess === 'NO_ACCESS') return res.json([]);
+  const { where, params } = arrearWhere(req);
+  const [rows] = await pool.query(
+    `${ARREAR_LIST_SQL} ${where} ORDER BY a.arrear_from_year DESC, a.arrear_from_month DESC, es.name, e.full_name`, params
+  );
+  res.json(rows);
+});
+
+// Loads one arrear row and applies the same checks every single-slip route needs.
+async function loadArrearForRequest(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) { res.status(404).json({ message: 'Arrear slip not found' }); return null; }
+  const [[a]] = await pool.query(
+    `SELECT a.id, a.employee_id, a.establishment_id, a.arrear_from_month, a.arrear_from_year, a.arrear_to_month, a.arrear_to_year,
+            e.employee_id AS emp_code, e.full_name
+     FROM arrear_data a JOIN employees e ON e.id = a.employee_id WHERE a.id = ?`, [id]
+  );
+  if (!a) { res.status(404).json({ message: 'Arrear slip not found' }); return null; }
+  if (!allowEstablishment(req, res, a.establishment_id, 'You do not have access to this establishment\'s salary slips.')) return null;
+  const own = resolveOwnEmployeeId(req);
+  if (own && a.employee_id !== own) { res.status(403).json({ message: 'You can only view your own salary slips' }); return null; }
+  return a;
+}
+
+router.get('/arrear/:id/preview', requirePermission('salary_slips', 'view'), async (req, res) => {
+  if (req.user.salarySlipAccess === 'NO_ACCESS') {
+    return res.status(403).json({ message: 'You do not have access to salary slips' });
+  }
+  const a = await loadArrearForRequest(req, res);
+  if (!a) return;
+  const buffer = await generateArrearSlipBuffer(a.id);
+  res.setHeader('Content-Disposition', 'inline');
+  res.setHeader('Content-Type', 'application/pdf');
+  res.send(buffer);
+});
+
+router.get('/arrear/:id/download', requirePermission('salary_slips', 'view'), async (req, res) => {
+  if (req.user.salarySlipAccess !== 'VIEW_DOWNLOAD') {
+    return res.status(403).json({ message: 'Your account is not permitted to download salary slips' });
+  }
+  const a = await loadArrearForRequest(req, res);
+  if (!a) return;
+  const buffer = await generateArrearSlipBuffer(a.id);
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(arrearDownloadName(a.full_name, a.emp_code, a))}"`);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.send(buffer);
+});
+
+// ZIP of arrear slips, one folder per establishment — ?ids=1,2,3 for an exact
+// selection, otherwise the same filters as the list. Generated as the ZIP is
+// built; nothing is saved.
+router.get('/arrear-bulk-download', requirePermission('salary_slips', 'view'), async (req, res) => {
+  if (req.user.salarySlipAccess !== 'VIEW_DOWNLOAD') {
+    return res.status(403).json({ message: 'Your account is not permitted to download salary slips' });
+  }
+  const base = arrearWhere(req);
+  let where = base.where;
+  let params = base.params;
+  if (req.query.ids) {
+    const ids = String(req.query.ids).split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+    if (!ids.length) return res.status(400).json({ message: 'No valid slip ids provided' });
+    where = where ? `${where} AND a.id IN (?)` : 'WHERE a.id IN (?)';
+    params = [...params, ids];
+  }
+  const [rows] = await pool.query(`${ARREAR_LIST_SQL} ${where} ORDER BY es.name, e.full_name`, params);
+  if (!rows.length) return res.status(404).json({ message: 'No arrear slips found for this selection' });
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="arrear-salary-slips.zip"');
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (err) => { throw err; });
+  archive.pipe(res);
+  for (const row of rows) {
+    const buffer = await generateArrearSlipBuffer(row.id);
+    const folder = sanitizeName(row.establishment_name) || 'Establishment';
+    archive.append(buffer, { name: `${folder}/${arrearDownloadName(row.full_name, row.emp_code, row)}` });
+  }
+  await archive.finalize();
 });
 
 module.exports = router;

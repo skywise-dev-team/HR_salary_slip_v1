@@ -15,16 +15,19 @@ const pool = require('../config/db');
 // your own password). `description` is a short human-readable summary,
 // e.g. "Updated employee EMP001234" or "Bulk imported 250 employee(s)".
 //
+// `establishmentId` (optional) tags the entry with the establishment it is
+// about, so a user limited to some establishments sees only their own.
+//
 // A logging failure is swallowed (and printed to the server console)
 // rather than allowed to break the actual request it's attached to —
 // losing one audit-log line is far preferable to failing a real save.
-async function logActivity(req, action, moduleKey, description) {
+async function logActivity(req, action, moduleKey, description, establishmentId = null) {
   if (!req.user || req.user.source !== 'user') return;
   try {
     await pool.query(
-      `INSERT INTO activity_log (user_id, performed_by, role_name, action, module_key, description)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.user.id, req.user.userId, req.user.roleName, action, moduleKey, description]
+      `INSERT INTO activity_log (user_id, performed_by, role_name, action, module_key, description, establishment_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, req.user.userId, req.user.roleName, action, moduleKey, description, establishmentId || null]
     );
   } catch (err) {
     console.error('Failed to write activity log:', err.message);

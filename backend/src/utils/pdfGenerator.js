@@ -46,7 +46,12 @@ function amountWords(amount) {
   const cr = Math.floor(n / 10000000); n %= 10000000;
   const la = Math.floor(n / 100000); n %= 100000;
   const th = Math.floor(n / 1000); n %= 1000;
-  if (cr) parts.push(`${twoWords(cr)} Crore`);
+  if (cr) {
+    const crWords = cr < 1000
+      ? threeWords(cr)
+      : `${threeWords(Math.floor(cr / 1000))} Thousand${cr % 1000 ? ' ' + threeWords(cr % 1000) : ''}`;
+    parts.push(`${crWords} Crore`);
+  }
   if (la) parts.push(`${twoWords(la)} Lakh`);
   if (th) parts.push(`${twoWords(th)} Thousand`);
   if (n) parts.push(threeWords(n));
@@ -160,7 +165,7 @@ async function generateSalarySlipPdf(record, secondRecord = null) {
       originalText(str, x, y, { features: ['-liga', '-clig', '-dlig'], ...options });
 
     const sliceH = doc.page.height / 2;
-    drawSlip(doc, record, 0, sliceH);
+    const endY = drawSlip(doc, record, 0, sliceH);
     // A single downloaded/printed slip leaves the bottom half of the page
     // blank rather than repeating the same slip — the two-per-page layout
     // is for printing two DIFFERENT employees' slips together (pass
@@ -169,6 +174,12 @@ async function generateSalarySlipPdf(record, secondRecord = null) {
       doc.moveTo(0, sliceH).lineTo(doc.page.width, sliceH).lineWidth(0.5).dash(3, { space: 2 }).stroke('#AAAAAA');
       doc.undash();
       drawSlip(doc, secondRecord, sliceH, sliceH);
+    } else if (doc.page.dictionary && doc.page.dictionary.data) {
+      // Single slip: end the page right after the footer instead of leaving
+      // the rest of the A4 sheet blank.
+      const h = Math.min(doc.page.height, Math.ceil(endY + 8 * MM));
+      doc.page.dictionary.data.MediaBox = [0, doc.page.height - h, doc.page.width, doc.page.height];
+      doc.page.dictionary.data.CropBox = [0, doc.page.height - h, doc.page.width, doc.page.height];
     }
 
     doc.end();
@@ -220,7 +231,7 @@ function drawSlip(doc, record, originY, sliceH) {
   hy += 10.5;
   doc.font('bolditalic').fontSize(8).text('Occupational Safety, Health and Working Conditions Code, 2020', marginX, hy, { width: contentWidth, align: 'center' });
   hy += 10.5;
-  doc.font('bold').fontSize(13).text('WAGE / SALARY SLIP', marginX, hy, { width: contentWidth, align: 'center' });
+  doc.font('bold').fontSize(13).text(record.isArrear ? 'ARREAR WAGE / SALARY SLIP' : 'WAGE / SALARY SLIP', marginX, hy, { width: contentWidth, align: 'center' });
   hy += 16; // clears the 13pt title's full line height before the rule below
 
   y = Math.max(headerTop + headerContentHeight + 3, hy);
@@ -229,7 +240,10 @@ function drawSlip(doc, record, originY, sliceH) {
 
   // --- Date of issue / Period ---
   const issueDate = record.issueDate || formatDate(new Date());
-  const period = `${MONTHS[record.period_month]}-${record.period_year}`;
+  // An arrear slip shows the whole arrear period (from - to) instead of one month.
+  const period = record.isArrear
+    ? `From ${MONTHS[record.arrear_from_month]}-${record.arrear_from_year} to ${MONTHS[record.arrear_to_month]}-${record.arrear_to_year}`
+    : `${MONTHS[record.period_month]}-${record.period_year}`;
 
   doc.font('reg').fontSize(FS).text('Date of issue: ', marginX, y, { lineBreak: false });
   const dateLabelW = doc.widthOfString('Date of issue: ');
@@ -440,6 +454,7 @@ function drawSlip(doc, record, originY, sliceH) {
   doc.font('reg').fontSize(7).fillColor('#555555')
     .text(`Computer-generated Wages / Salary slip \u00b7 ${period}`, marginX, footerY, { width: contentWidth, align: 'center' });
   doc.fillColor('#000000');
+  return footerY + 10;
 }
 
 module.exports = { generateSalarySlipPdf, formatINR, amountWords, formatDate };

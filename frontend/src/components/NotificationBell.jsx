@@ -4,7 +4,7 @@ import api from '../api/axios.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
 export default function NotificationBell() {
-  const { isAdmin } = useAuth();
+  const { canApprove } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState(0);
@@ -60,7 +60,7 @@ export default function NotificationBell() {
       loadCount();
       setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: 1 } : x)));
     }
-    if (n.approval_id && isAdmin) {
+    if (n.approval_id && canApprove) {
       setOpen(false);
       navigate('/approvals');
     }

@@ -21,19 +21,10 @@ function ModuleRoute({ moduleKey, children }) {
 }
 
 // Approvals is deliberately NOT a togglable module in Roles & Permissions —
-// only the Admin role can ever reach it, with no way to accidentally grant
-// this to anyone else the way a normal module permission could be.
-function AdminRoute({ children }) {
-  const { isAdmin, firstAllowedPath } = useAuth();
-  return isAdmin ? children : <Navigate to={firstAllowedPath()} replace />;
-}
-
-// Stricter still: only the one protected admin account may configure
-// approval routing rules — if any Admin could, they could trivially
-// reassign a restricted rule to include themselves.
-function SuperAdminRoute({ children }) {
-  const { isSuperAdmin, firstAllowedPath } = useAuth();
-  return isSuperAdmin ? children : <Navigate to={firstAllowedPath()} replace />;
+// it is for accounts with "Can approve" turned on (Users page), any role.
+function ApproverRoute({ children }) {
+  const { canApprove, firstAllowedPath } = useAuth();
+  return canApprove ? children : <Navigate to={firstAllowedPath()} replace />;
 }
 
 function HomeRedirect() {
@@ -58,8 +49,8 @@ export default function App() {
       <Route path="/users" element={<ProtectedRoute><ModuleRoute moduleKey="users"><Users /></ModuleRoute></ProtectedRoute>} />
       <Route path="/roles" element={<ProtectedRoute><ModuleRoute moduleKey="roles_permissions"><RolesPermissions /></ModuleRoute></ProtectedRoute>} />
       <Route path="/activity-log" element={<ProtectedRoute><ModuleRoute moduleKey="activity_log"><ActivityLog /></ModuleRoute></ProtectedRoute>} />
-      <Route path="/approvals" element={<ProtectedRoute><AdminRoute><Approvals /></AdminRoute></ProtectedRoute>} />
-      <Route path="/approval-routing" element={<ProtectedRoute><SuperAdminRoute><ApprovalRouting /></SuperAdminRoute></ProtectedRoute>} />
+      <Route path="/approvals" element={<ProtectedRoute><ApproverRoute><Approvals /></ApproverRoute></ProtectedRoute>} />
+      <Route path="/approval-routing" element={<ProtectedRoute><ModuleRoute moduleKey="approval_routing"><ApprovalRouting /></ModuleRoute></ProtectedRoute>} />
 
       <Route path="/" element={<ProtectedRoute><HomeRedirect /></ProtectedRoute>} />
       <Route path="*" element={<ProtectedRoute><HomeRedirect /></ProtectedRoute>} />

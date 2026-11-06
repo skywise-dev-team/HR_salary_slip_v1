@@ -8,7 +8,8 @@ const MODULES = [
   { key: 'salary_slips', label: 'Salary Slips' },
   { key: 'users', label: 'Users' },
   { key: 'roles_permissions', label: 'Roles & Permissions' },
-  { key: 'activity_log', label: 'Activity Log' }
+  { key: 'activity_log', label: 'Activity Log' },
+  { key: 'approval_routing' , label: 'Approval Routing' }
 ];
 
 const MODULE_KEYS = MODULES.map((m) => m.key);

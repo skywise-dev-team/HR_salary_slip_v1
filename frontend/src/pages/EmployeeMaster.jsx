@@ -14,7 +14,7 @@ import { API_BASE } from '../config/apiBase.js';
 
 const EMPTY = {
   employee_id: '', full_name: '', relative_name: '', relation: '', designation: '',
-  uan: '', bank_account_no: '', establishment_id: '', active_from: '', status: 'ACTIVE',
+  uan: '', bank_account_no: '', establishment_id: '', active_from: '', inactive_date: '', status: 'ACTIVE',
   email: '', app_access: 'NO', salary_slip_access: 'VIEW_ONLY'
 };
 
@@ -25,6 +25,12 @@ const SALARY_ACCESS_LABELS = {
 };
 
 const PAGE_SIZE_OPTIONS = [50, 100, 150, 200];
+
+// Today as yyyy-mm-dd (local time) - the default "Effective from" date.
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 export default function EmployeeMaster() {
   const [rows, setRows] = useState([]);
@@ -43,6 +49,9 @@ export default function EmployeeMaster() {
   const { importing, progress: importProgress, result: importResult, startImport, updateProgress, finishImport, cancelImport } = useImportSlot('employees');
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [exportFor, setExportFor] = useState(null);        // { ids: number[] | null, label } while the export window is open
+  const [exportMode, setExportMode] = useState('changes'); // 'changes' | 'current'
+  const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
   const { showToast } = useToast();
@@ -53,7 +62,7 @@ export default function EmployeeMaster() {
     if (search) params.search = search;
     if (estFilter) params.establishment_id = estFilter;
     if (statusFilter) params.status = statusFilter;
-    api.get('/api/employees', { params }).then(({ data }) => { setRows(data); setSelectedIds([]); });
+    api.get('/api/employees', { params }).then(({ data }) => setRows(data));   // ticked employees stay ticked across searches / filters
   };
 
   useEffect(() => {
@@ -67,12 +76,13 @@ export default function EmployeeMaster() {
 
   const pagedRows = rows.slice((page - 1) * pageSize, page * pageSize);
 
+  const reactivating = !!editing && editing.status === 'INACTIVE' && form.status === 'ACTIVE';
   const refreshAllEmployees = () => api.get('/api/employees').then(({ data }) => setAllEmployees(data));
 
-  const openAdd = () => { setEditing(null); setForm(EMPTY); setError(''); setModalOpen(true); };
+  const openAdd = () => { setEditing(null); setForm({ ...EMPTY, effective_date: todayStr() }); setError(''); setModalOpen(true); };
   const openEdit = (row) => {
     setEditing(row);
-    setForm({ ...row, active_from: row.active_from ? row.active_from.slice(0, 10) : '' });
+    setForm({ ...row, active_from: row.active_from ? row.active_from.slice(0, 10) : '', inactive_date: row.inactive_date ? row.inactive_date.slice(0, 10) : '', effective_date: (() => { const af = row.active_from ? row.active_from.slice(0, 10) : ''; const last = row.last_effective_date || ''; return last && last >= af ? last : (af || todayStr()); })() });
     setError('');
     setModalOpen(true);
   };
@@ -96,13 +106,20 @@ export default function EmployeeMaster() {
     }
   };
 
-  const toggleStatus = async (row) => {
-    const next = row.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
-    const accessNote = next === 'INACTIVE' ? ' This also revokes their app access.' : ' This also grants/restores their app access.';
-    if (!confirm(`${next === 'ACTIVE' ? 'Reactivate' : 'Deactivate'} employee "${row.full_name}"?${accessNote}`)) return;
-    const res = await api.patch(`/api/employees/${row.id}/status`, { status: next });
-    showResultToast(showToast, res, `Employee ${next === 'ACTIVE' ? 'reactivated' : 'deactivated'}.`);
-    load();
+  // App access on / off. Turning it on gives the employee View only access to
+  // salary slips; the download right is then given on the Edit form. Active /
+  // Inactive is changed only on the Edit form.
+  const toggleAppAccess = async (row) => {
+    const next = row.app_access === 'YES' ? 'NO' : 'YES';
+    const note = next === 'YES' ? ' They will be given View only access to salary slips.' : ' Their login will be removed.';
+    if (!confirm(`Turn app access ${next === 'YES' ? 'ON' : 'OFF'} for "${row.full_name}"?${note}`)) return;
+    try {
+      const res = await api.patch(`/api/employees/${row.id}/app-access`, { app_access: next });
+      showResultToast(showToast, res, `App access turned ${next === 'YES' ? 'on' : 'off'}.`);
+      load();
+    } catch (err) {
+      showToast(err.response?.data?.message || 'Could not change app access', 'error');
+    }
   };
 
   const remove = async (row) => {
@@ -125,16 +142,22 @@ export default function EmployeeMaster() {
 
   const toggleOne = (id) => setSelectedIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
   const allSelected = rows.length > 0 && rows.every((r) => selectedIds.includes(r.id));
-  const toggleAll = () => setSelectedIds(allSelected ? [] : rows.map((r) => r.id));
+  // Header tick works on the employees currently listed; anyone ticked earlier
+  // (e.g. under a different search) stays ticked.
+  const toggleAll = () => setSelectedIds((ids) => {
+    const shown = rows.map((r) => r.id);
+    return allSelected ? ids.filter((id) => !shown.includes(id)) : [...new Set([...ids, ...shown])];
+  });
 
-  const bulkSetStatus = async (status) => {
+  const bulkSetAppAccess = async (access) => {
     if (!selectedIds.length) return;
-    const accessNote = status === 'INACTIVE' ? ' This also revokes their app access.' : ' This also grants/restores their app access.';
-    if (!confirm(`${status === 'ACTIVE' ? 'Reactivate' : 'Deactivate'} ${selectedIds.length} selected employee(s)?${accessNote}`)) return;
+    const note = access === 'YES' ? ' They will be given View only access to salary slips (inactive employees are skipped).' : ' Their logins will be removed.';
+    if (!confirm(`Turn app access ${access === 'YES' ? 'ON' : 'OFF'} for ${selectedIds.length} selected employee(s)?${note}`)) return;
     setBulkBusy(true);
     try {
-      const res = await api.patch('/api/employees/bulk/status', { ids: selectedIds, status });
-      showResultToast(showToast, res, 'Updated successfully!');
+      const res = await api.patch('/api/employees/bulk/app-access', { ids: selectedIds, app_access: access });
+      showResultToast(showToast, res, res.data?.message || 'Updated successfully!');
+      setSelectedIds([]);
       load();
     } catch (err) {
       showToast(err.response?.data?.message || 'Bulk update failed', 'error');
@@ -150,6 +173,7 @@ export default function EmployeeMaster() {
     try {
       const res = await api.delete('/api/employees/bulk', { data: { ids: selectedIds } });
       showResultToast(showToast, res, 'Deleted successfully!');
+      setSelectedIds([]);
       load();
       refreshAllEmployees();
     } catch (err) {
@@ -171,19 +195,44 @@ export default function EmployeeMaster() {
     window.open(`${base}/api/employees/template?token=${token}`, '_blank');
   };
 
-  // The one "Export to Excel" button exports full posting history (one row
-  // per establishment transfer), not just a current-state snapshot — that
-  // way an employee's past postings, and even employees since deleted, still
-  // show up in the file.
-  const exportToExcel = () => {
-    const token = localStorage.getItem('token');
-    const base = API_BASE;
-    const params = new URLSearchParams();
-    if (search) params.set('search', search);
-    if (estFilter) params.set('establishment_id', estFilter);
-    if (statusFilter) params.set('status', statusFilter);
-    params.set('token', token);
-    window.open(`${base}/api/employees/export-history?${params.toString()}`, '_blank');
+  // "Export to Excel" (top button, or the Export link on a row) first asks
+  // what to export - the full change history or only today's details - and
+  // then builds the file. ids = the employees to export; null = everyone the
+  // current search/filters show.
+  const openExport = (ids, label) => {
+    setExportMode('changes');
+    setExportFor({ ids, label });
+  };
+
+  const runExport = async () => {
+    if (!exportFor) return;
+    setExporting(true);
+    try {
+      const body = { mode: exportMode };
+      if (exportFor.ids) body.ids = exportFor.ids;
+      else {
+        if (search) body.search = search;
+        if (estFilter) body.establishment_id = estFilter;
+        if (statusFilter) body.status = statusFilter;
+      }
+      const res = await api.post('/api/employees/export', body, { responseType: 'blob' });
+      const disposition = res.headers?.['content-disposition'] || '';
+      const named = /filename="?([^";]+)"?/i.exec(disposition);
+      const filename = named ? named[1] : `employees-${exportMode === 'changes' ? 'with-changes' : 'current-details'}.xlsx`;
+      const url = URL.createObjectURL(res.data);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setExportFor(null);
+    } catch (err) {
+      showToast('Could not create the Excel file. Please try again.', 'error');
+    } finally {
+      setExporting(false);
+    }
   };
 
   const runImport = async () => {
@@ -240,7 +289,14 @@ export default function EmployeeMaster() {
           <h1 className="page-title">Employee master</h1>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-outline" onClick={exportToExcel}>Export to Excel</button>
+          <button
+            className="btn btn-outline"
+            onClick={() => (selectedIds.length
+              ? openExport(selectedIds, `${selectedIds.length} selected employee(s)`)
+              : openExport(null, `All ${rows.length} employee(s) shown by the current search and filters`))}
+          >
+            Export to Excel
+          </button>
           <button className="btn btn-primary" onClick={openAdd}>Add one employee</button>
         </div>
       </div>
@@ -305,8 +361,8 @@ export default function EmployeeMaster() {
       {selectedIds.length > 0 && (
         <div className="card" style={{ marginBottom: 16, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <strong>{selectedIds.length} selected</strong>
-          <button className="btn btn-outline btn-sm" disabled={bulkBusy} onClick={() => bulkSetStatus('ACTIVE')}>Reactivate</button>
-          <button className="btn btn-outline btn-sm" disabled={bulkBusy} onClick={() => bulkSetStatus('INACTIVE')}>Deactivate</button>
+          <button className="btn btn-outline btn-sm" disabled={bulkBusy} onClick={() => bulkSetAppAccess('YES')}>App access: Yes</button>
+          <button className="btn btn-outline btn-sm" disabled={bulkBusy} onClick={() => bulkSetAppAccess('NO')}>App access: No</button>
           <button className="btn btn-outline btn-sm btn-danger-outline" disabled={bulkBusy} onClick={bulkDelete}>Delete selected</button>
           <button className="link-btn" onClick={() => setSelectedIds([])}>Clear selection</button>
         </div>
@@ -334,24 +390,25 @@ export default function EmployeeMaster() {
                 <td className="nowrap">{r.establishment_name}</td>
                 <td>{r.bank_account_no ? `******${r.bank_account_no.slice(-4)}` : '-'}</td>
                 <td>
-                  {r.app_access === 'YES' ? (
-                    <div>
-                      <div>Yes</div>
-                      <div className="muted small">{SALARY_ACCESS_LABELS[r.salary_slip_access] || r.salary_slip_access}</div>
-                    </div>
-                  ) : (
-                    <span className="muted">No</span>
-                  )}
+                  <div className="toggle-cell">
+                    <Toggle checked={r.app_access === 'YES'} disabled={r.status !== 'ACTIVE' && r.app_access !== 'YES'} onChange={() => toggleAppAccess(r)} />
+                    {r.app_access === 'YES' ? (
+                      <div>
+                        <div>Yes</div>
+                        <div className="muted small">{SALARY_ACCESS_LABELS[r.salary_slip_access] || r.salary_slip_access}</div>
+                      </div>
+                    ) : (
+                      <span className="muted">No</span>
+                    )}
+                  </div>
                 </td>
                 <td>
-                  <div className="toggle-cell">
-                    <Toggle checked={r.status === 'ACTIVE'} onChange={() => toggleStatus(r)} />
-                    <StatusBadge status={r.status} />
-                  </div>
+                  <StatusBadge status={r.status} />
                 </td>
                 <td className="nowrap">
                   <button className="link-btn" onClick={() => openEdit(r)}>Edit</button>
                   <button className="link-btn" onClick={() => openHistory(r)}>History</button>
+                  <button className="link-btn" onClick={() => openExport([r.id], `${r.full_name} (${r.employee_id})`)}>Export</button>
                   {isAdmin && r.app_access === 'YES' && (
                     <button className="link-btn" onClick={() => resetPassword(r)}>Reset Password</button>
                   )}
@@ -381,11 +438,11 @@ export default function EmployeeMaster() {
 
             <div>
               <label>Father's / Mother's / Spouse's name</label>
-              <input value={form.relative_name || ''} onChange={(e) => setForm({ ...form, relative_name: e.target.value })} />
+              <input value={form.relative_name || ''} onChange={(e) => setForm({ ...form, relative_name: e.target.value })} required={!editing} />
             </div>
             <div>
               <label>Relation</label>
-              <select value={form.relation || ''} onChange={(e) => setForm({ ...form, relation: e.target.value })}>
+              <select value={form.relation || ''} onChange={(e) => setForm({ ...form, relation: e.target.value })} required={!editing}>
                 <option value="">Select</option>
                 <option>Father</option>
                 <option>Mother</option>
@@ -395,7 +452,7 @@ export default function EmployeeMaster() {
 
             <div>
               <label>Designation</label>
-              <input value={form.designation || ''} onChange={(e) => setForm({ ...form, designation: e.target.value })} />
+              <input value={form.designation || ''} onChange={(e) => setForm({ ...form, designation: e.target.value })} required={!editing} />
             </div>
             <div>
               <label>UAN</label>
@@ -412,7 +469,7 @@ export default function EmployeeMaster() {
 
             <div>
               <label>Bank account number</label>
-              <input value={form.bank_account_no || ''} onChange={(e) => setForm({ ...form, bank_account_no: e.target.value })} />
+              <input value={form.bank_account_no || ''} onChange={(e) => setForm({ ...form, bank_account_no: e.target.value })} required={!editing} />
             </div>
             <div>
               <label>Establishment</label>
@@ -423,24 +480,50 @@ export default function EmployeeMaster() {
             </div>
 
             <div>
-              <label>Active from</label>
-              <input type="date" value={form.active_from || ''} onChange={(e) => setForm({ ...form, active_from: e.target.value })} />
+              <label>{reactivating ? 'Active from (new date)' : 'Active from'}</label>
+              <input type="date" value={form.active_from || ''} max={todayStr()} onChange={(e) => { const v = e.target.value; setForm((f) => ({ ...f, active_from: v, effective_date: v && f.effective_date && f.effective_date < v ? v : f.effective_date })); }} required={!editing || reactivating} />
             </div>
             <div>
               <label>Status</label>
-              <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+              <select
+                value={form.status}
+                onChange={(e) => {
+                  const status = e.target.value;
+                  setForm((f) => {
+                    const next = { ...f, status, inactive_date: status === 'INACTIVE' ? (f.inactive_date || todayStr()) : '' };
+                    if (status === 'INACTIVE') next.app_access = 'NO';
+                    // Made active again: the Active-from date is asked (left blank to be filled in).
+                    if (editing && editing.status === 'INACTIVE') {
+                      next.active_from = status === 'ACTIVE' ? '' : (editing.active_from ? editing.active_from.slice(0, 10) : '');
+                    }
+                    return next;
+                  });
+                }}
+              >
                 <option value="ACTIVE">On rolls</option>
                 <option value="INACTIVE">Inactive</option>
               </select>
             </div>
+            {form.status === 'INACTIVE' && (
+              <div>
+                <label>Inactive date</label>
+                <input type="date" value={form.inactive_date || ''} min={form.active_from || undefined} max={todayStr()} onChange={(e) => setForm({ ...form, inactive_date: e.target.value })} required />
+              </div>
+            )}
 
+            {editing && (
+              <div className="span-2">
+                <label>Effective from</label>
+                <input type="date" value={form.effective_date || ''} min={form.active_from || undefined} max={todayStr()} onChange={(e) => setForm({ ...form, effective_date: e.target.value })} required />
+              </div>
+            )}
             <div>
               <label>Email (optional)</label>
               <input type="email" value={form.email || ''} onChange={(e) => setForm({ ...form, email: e.target.value })} />
             </div>
             <div>
               <label>App access</label>
-              <select value={form.app_access || 'NO'} onChange={(e) => setForm({ ...form, app_access: e.target.value })}>
+              <select value={form.app_access || 'NO'} disabled={form.status === 'INACTIVE'} onChange={(e) => setForm({ ...form, app_access: e.target.value })}>
                 <option value="NO">No</option>
                 <option value="YES">Yes</option>
               </select>
@@ -461,6 +544,32 @@ export default function EmployeeMaster() {
               <button className="btn btn-primary">{editing ? 'Save changes' : 'Add employee'}</button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {exportFor && (
+        <Modal title="Export to Excel" onClose={() => !exporting && setExportFor(null)} width={560}>
+          <p style={{ marginTop: 0 }}><strong>Exporting:</strong> {exportFor.label}</p>
+          <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 10, cursor: 'pointer', margin: '12px 0', fontWeight: 400 }}>
+            <input type="radio" name="exportMode" style={{ width: 16, height: 16, marginTop: 3, flex: '0 0 16px' }}
+              checked={exportMode === 'changes'} onChange={() => setExportMode('changes')} />
+            <span>
+              <strong>With changes</strong>
+            </span>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 10, cursor: 'pointer', margin: '12px 0', fontWeight: 400 }}>
+            <input type="radio" name="exportMode" style={{ width: 16, height: 16, marginTop: 3, flex: '0 0 16px' }}
+              checked={exportMode === 'current'} onChange={() => setExportMode('current')} />
+            <span>
+              <strong>Current details only</strong>
+            </span>
+          </label>
+          <div className="modal-actions" style={{ marginTop: 16 }}>
+            <button type="button" className="btn btn-outline" disabled={exporting} onClick={() => setExportFor(null)}>Cancel</button>
+            <button type="button" className="btn btn-primary" disabled={exporting} onClick={runExport}>
+              {exporting ? 'Preparing...' : 'Export'}
+            </button>
+          </div>
         </Modal>
       )}
 

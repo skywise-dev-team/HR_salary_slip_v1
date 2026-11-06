@@ -5,8 +5,9 @@ import api from '../api/axios.js';
 import { useToast } from '../context/ToastContext.jsx';
 
 // Modules with nothing on them to edit or delete — View is the only
-// permission that's ever meaningful for these.
-const VIEW_ONLY_MODULES = ['dashboard', 'activity_log'];
+// permission that's ever meaningful for these. (For Salary Slips, View
+// means preview and download.)
+const VIEW_ONLY_MODULES = ['dashboard', 'activity_log', 'salary_slips'];
 
 export default function RolesPermissions() {
   const [roles, setRoles] = useState([]);
@@ -104,11 +105,11 @@ export default function RolesPermissions() {
               <tr key={r.id}>
                 <td>{r.role_name}</td>
                 <td>{r.description || '-'}</td>
-                <td><button className="btn btn-primary btn-sm" onClick={() => openManageAccess(r)}>Manage Access</button></td>
+                <td>{r.role_name === 'Employee' ? <span className="muted">—</span> : <button className="btn btn-primary btn-sm" onClick={() => openManageAccess(r)}>Manage Access</button>}</td>
                 <td>
                   <button className="link-btn" onClick={() => openEdit(r)}>Edit</button>
                   <button className="link-btn" onClick={() => setViewing(r)}>View</button>
-                  <button className="link-btn danger" onClick={() => remove(r)}>Delete</button>
+                  {r.role_name !== 'Employee' && <button className="link-btn danger" onClick={() => remove(r)}>Delete</button>}
                 </td>
               </tr>
             ))}
@@ -124,7 +125,7 @@ export default function RolesPermissions() {
 
             <div>
               <label>Title</label>
-              <input value={form.role_name} onChange={(e) => setForm({ ...form, role_name: e.target.value })} placeholder="Role title" required />
+              <input value={form.role_name} readOnly={editing?.role_name === 'Employee'} onChange={(e) => setForm({ ...form, role_name: e.target.value })} placeholder="Role title" required />
             </div>
             <div>
               <label>Description</label>
@@ -132,14 +133,13 @@ export default function RolesPermissions() {
             </div>
             <div>
               <label>Select modules</label>
-              <small className="hint">Selected modules get View access by default — grant Edit/Delete afterwards via Manage Access.</small>
               <div className="chip-select" style={{ marginTop: 6 }}>
-                {modules.map((m) => (
+                {modules.filter((m) => editing?.role_name !== 'Employee' || m.key === 'salary_slips').map((m) => (
                   <button
                     type="button"
                     key={m.key}
                     className={`chip${form.modules.includes(m.key) ? ' chip-selected' : ''}`}
-                    onClick={() => toggleModule(m.key)}
+                    onClick={() => { if (editing?.role_name !== 'Employee') toggleModule(m.key); }}
                   >
                     {m.label} {form.modules.includes(m.key) ? '\u00d7' : ''}
                   </button>

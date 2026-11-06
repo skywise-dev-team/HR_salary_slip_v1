@@ -11,6 +11,7 @@ const { startImportProgress } = require('../utils/importProgress');
 const { findNullCellProblems, nullCellErrorMessage } = require('../utils/nullCellCheck');
 const { logActivity } = require('../utils/activityLog');
 const { isAdminUser, createApprovalRequest } = require('../utils/approvals');
+const { isRestricted } = require('../utils/establishmentScope');
 
 const router = asyncRouter();
 router.use(requireAuth);
@@ -23,11 +24,21 @@ router.use(requireNotPendingPasswordChange);
 // be deleted or modified directly via a SQL query against the database.
 const PROTECTED_USER_ID = 'admin';
 
+// The Employee role belongs to Employee Master logins only (every employee with
+// app access gets it automatically). It is never assigned to a staff account.
+const EMPLOYEE_ROLE_NAME = 'Employee';
+const EMPLOYEE_ROLE_MESSAGE = 'The Employee role is given automatically to employees with app access and cannot be assigned to a user.';
+async function assertAssignableRole(roleId) {
+  if (!roleId) return;
+  const [[role]] = await pool.query('SELECT role_name FROM roles WHERE id = ?', [roleId]);
+  if (role && role.role_name === EMPLOYEE_ROLE_NAME) { const err = new Error(EMPLOYEE_ROLE_MESSAGE); err.status = 400; throw err; }
+}
+
 const TEMPLATE_HEADERS = ['user_id', 'email', 'role_name', 'status'];
 const TEMPLATE_EXAMPLE = ['jdoe01', 'jane.doe@example.com', 'Admin', 'ACTIVE'];
 
 router.get('/template', requirePermission('users', 'edit'), async (req, res) => {
-  const [roles] = await pool.query('SELECT role_name FROM roles ORDER BY role_name');
+  const [roles] = await pool.query('SELECT role_name FROM roles WHERE role_name != ? ORDER BY role_name', [EMPLOYEE_ROLE_NAME]);
   const validations = [
     { column: 'role_name', values: roles.map((r) => r.role_name) },
     { column: 'status', values: ['ACTIVE', 'INACTIVE'] }
@@ -41,31 +52,93 @@ router.get('/template', requirePermission('users', 'edit'), async (req, res) => 
 // effect, unchanged from before this feature existed), and later by the
 // approvals dispatcher when a non-Admin's staged request is approved.
 
+// ---- Establishment access ------------------------------------------------
+// A user either has access to every establishment (all_establishments = 1,
+// which also covers establishments created later) or only to the ones listed
+// in user_establishments. The Admin role is never limited by it.
+const cleanIdList = (raw) => [...new Set((Array.isArray(raw) ? raw : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+
+// Saves the access chosen on the form. Only runs when the request actually
+// carries it, so an older request or an Excel import never wipes access.
+async function saveEstablishmentAccess(userId, body) {
+  if (!('all_establishments' in body) && !('establishment_ids' in body)) return;
+  const all = body.all_establishments === true || body.all_establishments === 1 || body.all_establishments === '1';
+  await pool.query('UPDATE users SET all_establishments = ? WHERE id = ?', [all ? 1 : 0, userId]);
+  await pool.query('DELETE FROM user_establishments WHERE user_id = ?', [userId]);
+  const ids = all ? [] : cleanIdList(body.establishment_ids);
+  if (!ids.length) return;
+  const [valid] = await pool.query('SELECT id FROM establishments WHERE id IN (?)', [ids]);
+  if (valid.length) {
+    await pool.query('INSERT INTO user_establishments (user_id, establishment_id) VALUES ?', [valid.map((v) => [userId, v.id])]);
+  }
+}
+
+// Adds all_establishments (as true/false) and establishment_ids to user rows.
+async function attachAccess(rows) {
+  if (!rows.length) return rows;
+  const [links] = await pool.query('SELECT user_id, establishment_id FROM user_establishments WHERE user_id IN (?)', [rows.map((r) => r.id)]);
+  const byUser = {};
+  for (const l of links) (byUser[l.user_id] ||= []).push(Number(l.establishment_id));
+  return rows.map((r) => ({ ...r, all_establishments: !!r.all_establishments, establishment_ids: byUser[r.id] || [] }));
+}
+
+// Someone who is themselves limited to some establishments can only hand out
+// access within their own. Returns an error text, or null when fine.
+function accessGrantError(req, body) {
+  if (!isRestricted(req)) return null;
+  if (body.all_establishments === true || body.all_establishments === 1 || body.all_establishments === '1') {
+    return 'You can only give access to the establishments you have access to yourself.';
+  }
+  const own = req.user.estScope;
+  if (cleanIdList(body.establishment_ids).some((id) => !own.includes(id))) {
+    return 'You can only give access to the establishments you have access to yourself.';
+  }
+  return null;
+}
+
+// When a limited editor changes a user who also has establishments the editor
+// cannot see, those stay as they are - the editor's form never listed them.
+function keepHiddenAccess(req, existing, body) {
+  if (!isRestricted(req)) return body;
+  if (existing.all_establishments) return { ...body, all_establishments: true, establishment_ids: [] };
+  const own = req.user.estScope;
+  const hidden = existing.establishment_ids.filter((id) => !own.includes(id));
+  return { ...body, all_establishments: false, establishment_ids: [...cleanIdList(body.establishment_ids), ...hidden] };
+}
+
+// Email is optional: blank means "none".
+const emailOrNull = (v) => {
+  const t = v == null ? '' : String(v).trim();
+  return t === '' ? null : t;
+};
+
 async function applyCreateUser(body) {
   const { user_id, password, email, role_id, can_approve } = body;
   if (!user_id || !password || !role_id) { const err = new Error('User ID, password and role are required'); err.status = 400; throw err; }
-  if (!email) { const err = new Error('Email is required'); err.status = 400; throw err; }
   if (!/^[a-zA-Z0-9]+$/.test(user_id)) { const err = new Error('User ID may only contain letters and numbers'); err.status = 400; throw err; }
+  await assertAssignableRole(role_id);
 
   const hash = await bcrypt.hash(password, 10);
   const [result] = await pool.query(
     `INSERT INTO users (user_id, password_hash, email, role_id, status, can_approve) VALUES (?, ?, ?, ?, 'ACTIVE', ?)`,
-    [user_id, hash, email, role_id, can_approve ? 1 : 0]
+    [user_id, hash, emailOrNull(email), role_id, can_approve ? 1 : 0]
   );
+  await saveEstablishmentAccess(result.insertId, body);
   return { id: result.insertId, user_id };
 }
 
 async function applyUpdateUser(id, body) {
   const { email, role_id, password, can_approve } = body;
-  if (!email) { const err = new Error('Email is required'); err.status = 400; throw err; }
 
   const [[existing]] = await pool.query('SELECT user_id FROM users WHERE id = ?', [id]);
   if (!existing) { const err = new Error('User not found'); err.status = 404; throw err; }
+  await assertAssignableRole(role_id);
 
   // The protected admin account's ability to approve is permanent — never
   // settable through this form, on or off, regardless of what's submitted.
   const effectiveCanApprove = existing.user_id === PROTECTED_USER_ID ? 1 : (can_approve ? 1 : 0);
-  await pool.query(`UPDATE users SET email=?, role_id=?, can_approve=? WHERE id=?`, [email, role_id, effectiveCanApprove, id]);
+  await pool.query(`UPDATE users SET email=?, role_id=?, can_approve=? WHERE id=?`, [emailOrNull(email), role_id, effectiveCanApprove, id]);
+  await saveEstablishmentAccess(id, body);
   if (password) {
     const hash = await bcrypt.hash(password, 10);
     await pool.query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, id]);
@@ -99,6 +172,7 @@ async function applyDeleteUser(id) {
 async function applyRoleChangeUsers(ids, roleId) {
   const [[role]] = await pool.query('SELECT id FROM roles WHERE id = ?', [roleId]);
   if (!role) { const err = new Error('Role not found'); err.status = 404; throw err; }
+  await assertAssignableRole(roleId);
   const placeholders = ids.map(() => '?').join(',');
   await pool.query(`UPDATE users SET role_id = ? WHERE id IN (${placeholders})`, [roleId, ...ids]);
   return {};
@@ -163,6 +237,7 @@ router.patch('/bulk/role', requirePermission('users', 'edit'), async (req, res) 
   const { ids, role_id } = req.body;
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ message: 'No users selected' });
   if (!role_id) return res.status(400).json({ message: 'A role is required' });
+  try { await assertAssignableRole(role_id); } catch (err) { return res.status(err.status || 400).json({ message: err.message }); }
 
   if (!isAdminUser(req)) {
     await createApprovalRequest({
@@ -200,22 +275,25 @@ router.delete('/bulk', requirePermission('users', 'delete'), async (req, res) =>
 });
 
 const LIST_SQL = `
-  SELECT u.id, u.user_id, u.email, u.status, u.role_id, u.can_approve, r.role_name
+  SELECT u.id, u.user_id, u.email, u.status, u.role_id, u.can_approve, u.all_establishments, r.role_name
   FROM users u JOIN roles r ON r.id = u.role_id`;
 
 router.get('/', requirePermission('users', 'view'), async (req, res) => {
   const [rows] = await pool.query(`${LIST_SQL} ORDER BY u.user_id`);
-  res.json(rows);
+  res.json(await attachAccess(rows));
 });
 
 router.get('/:id', requirePermission('users', 'view'), async (req, res) => {
   const [[row]] = await pool.query(`${LIST_SQL} WHERE u.id = ?`, [req.params.id]);
   if (!row) return res.status(404).json({ message: 'User not found' });
-  res.json(row);
+  res.json((await attachAccess([row]))[0]);
 });
 
 router.post('/', requirePermission('users', 'edit'), async (req, res) => {
   const { user_id } = req.body;
+  const grantError = accessGrantError(req, req.body);
+  if (grantError) return res.status(403).json({ message: grantError });
+  try { await assertAssignableRole(req.body.role_id); } catch (err) { return res.status(err.status || 400).json({ message: err.message }); }
 
   if (!isAdminUser(req)) {
     if (!user_id) return res.status(400).json({ message: 'User ID is required' });
@@ -238,12 +316,17 @@ router.post('/', requirePermission('users', 'edit'), async (req, res) => {
 });
 
 router.put('/:id', requirePermission('users', 'edit'), async (req, res) => {
-  const [[existing]] = await pool.query('SELECT user_id FROM users WHERE id = ?', [req.params.id]);
+  const [[existing]] = await pool.query('SELECT user_id, all_establishments FROM users WHERE id = ?', [req.params.id]);
   if (!existing) return res.status(404).json({ message: 'User not found' });
 
+  const grantError = accessGrantError(req, req.body);
+  if (grantError) return res.status(403).json({ message: grantError });
+  try { await assertAssignableRole(req.body.role_id); } catch (err) { return res.status(err.status || 400).json({ message: err.message }); }
+
   if (!isAdminUser(req)) {
+    const [current] = await attachAccess([{ ...existing, id: Number(req.params.id) }]);
     await createApprovalRequest({
-      req, moduleKey: 'users', action: 'UPDATE', targetId: req.params.id, payload: req.body,
+      req, moduleKey: 'users', action: 'UPDATE', targetId: req.params.id, payload: keepHiddenAccess(req, current, req.body),
       description: `Edit user ${existing.user_id}`
     });
     return res.status(202).json({ message: 'Submitted for approval, pending.' });
@@ -357,6 +440,11 @@ async function processUserImportRows(conn, sheet, colIndex, results, reportProgr
         results.skipped++;
         continue;
       }
+      if (String(roleName).trim().toLowerCase() === EMPLOYEE_ROLE_NAME.toLowerCase()) {
+        results.errors.push(`Row ${r}: the Employee role cannot be assigned to a user`);
+        results.skipped++;
+        continue;
+      }
       const [[role]] = await conn.query('SELECT id FROM roles WHERE role_name = ?', [roleName]);
       if (!role) {
         results.errors.push(`Row ${r}: role_name "${roleName}" not found`);
@@ -378,7 +466,7 @@ async function processUserImportRows(conn, sheet, colIndex, results, reportProgr
         if (existing.user_id === PROTECTED_USER_ID) status = 'ACTIVE';
         await conn.query(
           `UPDATE users SET email=?, role_id=?, status=? WHERE id=?`,
-          [get('email'), role.id, status, existing.id]
+          [emailOrNull(get('email')), role.id, status, existing.id]
         );
         results.updated++;
         continue;
@@ -388,7 +476,7 @@ async function processUserImportRows(conn, sheet, colIndex, results, reportProgr
       await conn.query(
         `INSERT INTO users (user_id, password_hash, email, role_id, status, must_change_password)
          VALUES (?, ?, ?, ?, ?, 1)`,
-        [userId, passwordHash, get('email'), role.id, status]
+        [userId, passwordHash, emailOrNull(get('email')), role.id, status]
       );
       results.inserted++;
     } catch (err) {
@@ -448,7 +536,7 @@ router.post(
     // nullCellCheck.js for the exact rule. status is optional and falls
     // back to ACTIVE when left blank; salary_slip_access is no longer a
     // column at all, since every account always gets full access.
-    const REQUIRED_COLUMNS = ['user_id', 'email', 'role_name'];
+    const REQUIRED_COLUMNS = ['user_id', 'role_name'];   // email is optional
     const nullProblems = findNullCellProblems(sheet, colIndex, REQUIRED_COLUMNS);
     if (nullProblems.length) {
       fs.unlink(req.file.path, () => {});

@@ -70,61 +70,66 @@ LAN, so the server sees their real office addresses for the staff network restri
 
 ## 4. Application modules
 
-**Dashboard** — counts of establishments, active employees, active users, and slips on record
-(computed from `salary_data`, not a separately stored count), plus a table of recent pay periods.
-This page is view-only in Roles & Permissions — there's nothing on it to grant Edit/Delete access
-to.
+The left menu is a slim icon rail that opens when you hover over it. The signed-in user name and
+icon sit at the top right; clicking it opens **Change password** and **Sign out**. The same layout
+is used for employee logins.
+
+**Dashboard** — live counters and charts, refreshed automatically every 60 seconds and always
+computed from the database, so they grow and resize as slips and employees are added:
+Active Employees by Establishment, Slips per Pay Period, Active Users by Role and Employee Status,
+with the totals shown under each chart title. View-only in Roles & Permissions.
 
 **Master**
 - *Establishments* — company/unit records that print on salary slips (code, name, signatory
-  name, address, logo, signature). Uploading a new logo or signature never deletes or overwrites
-  the previous file — each upload gets its own unique filename — which is what allows already-
-  issued slips to keep showing the correct historical image even after a later change (see
-  [Salary slip generation](#8-salary-slip-generation--nothing-is-ever-stored-on-disk)).
-- *Employee Master* — fixed details printed on every slip (Employee ID, name, relative's name &
-  relation, designation, UAN, bank A/C, establishment, active-from date, Active/Inactive status).
-  Changing an employee's establishment automatically logs the change in posting history. An
-  employee can optionally be granted their own login (App Access = Yes), with a chosen level of
-  Salary Slip access (View & Download / View Only) — logging in with their Employee ID as the
-  username, restricted to only their own salary slips. Employee ID Transfer (renaming an existing
-  employee's ID in place) and password resets are Admin-only actions that never require approval.
+  name, address, logo, signature). Changes to the printed details take an **Effective from** date.
+  Uploading a new logo or signature never deletes or overwrites the previous file.
+- *Employee Master* — details printed on every slip (Employee ID, name, relative's name &
+  relation, designation, UAN, bank A/C, establishment, Active from) plus an optional email.
+  - **Add**: there is no Effective-from field; a new employee's details are effective from the
+    Active-from date.
+  - **Edit**: Effective from appears here. The form opens with the Effective-from date of the
+    last saved change. Status (Active / Inactive) is changed here only: going Inactive asks for the
+    Inactive date, and making an employee Active again asks for a new Active-from date.
+  - **App Access** is a toggle in the list column, for one employee or for a selection (bulk bar:
+    "App access: Yes / No"). Turning it on creates the employee login (the Employee ID is the
+    first password) with Salary slip access **View only**; the access level is then changed in
+    Edit. An Inactive employee cannot have app access.
+  - Search, establishment and status filters. Ticks are kept by employee across searches,
+    filters and pages; the header tick acts on the rows currently shown.
+  - **History** shows every change with its effective date; **Export** downloads the employee
+    details and the change history as Excel; Bulk import from Excel has a downloadable template.
+  - Employee ID Transfer and password resets are Admin-only and never need approval.
 
-**Upload Salary Data** — one row per employee per pay period; add manually or bulk-import via
-Excel. Gross earnings, total deductions, and net pay are computed automatically. Validation on
-every add/edit/import:
-  - D.A., HRA, and Conveyance Allowance must each be no greater than Basic Pay
-  - Total deductions must not exceed gross earnings (net pay can never come out negative)
-  - Paid days can't exceed the number of days actually in that period's month (leap years
-    handled correctly)
-  - Negative figures are allowed (for corrections/adjustments); an all-zero row is allowed too
-    (e.g. an employee absent the whole period)
+**Upload Salary Data**
+- *Monthly salary data* and *Arrear salary data* tabs — add one record, edit, delete, or bulk
+  import from Excel (template provided). Arrear records can also be exported to Excel. Both tabs
+  have search, selection kept across pages, and pagination.
+- Gross earnings, total deductions and net pay are computed automatically.
+- The checks are listed in [Business rules](#9-business-rules).
 
-  The summary table groups records by establishment and period; expanding a group lazily loads
-  its individual employee rows, with a name/ID search and a Delete action per employee.
+**Salary Slips** — Monthly and Arrear tabs. Every record has a slip that is generated at the
+moment it is previewed or downloaded.
+- With **All establishments** and **All months** selected (admin / HR views) the list is grouped:
+  Establishment → Employee → that employee's slips (latest first). Groups open collapsed; click to
+  expand. Every establishment is listed on the page and each one is paginated on its own. The
+  establishment and employee ticks select all of their slips (also across pages).
+- Choosing a specific establishment or month shows the plain list.
+- Preview inline, download one slip, or download a ZIP grouped into one folder per establishment.
+  What a user can do is controlled by their Salary slip access (View & Download / View only / No
+  access), enforced on the backend.
 
-**Salary Slips** — every salary record always has an available slip, generated fresh at the
-moment it's actually previewed or downloaded. List/filter by establishment, period, or
-employee; preview inline; download individually or as a ZIP (grouped into one folder per
-establishment inside the archive). A user's `salary_slip_access` setting (View & Download / View
-Only / No Access) controls what they can do here, enforced on the backend, not just hidden in the
-UI. There is no delete action on this page — removing a salary record (and with it, the ability
-to generate its slip at all) is done from Upload Salary Data.
-
-**Change Password** — lets the signed-in user change their own password.
+**Change Password** — the signed-in user changes their own password.
 
 **Admin**
-- *Users* — staff accounts (Admin, HR, or any other role). Each Admin-role account can also be
-  marked "Can approve" — eligible to be assigned specific approval tasks via Approval Routing
-  (see below). The protected `admin` account always has this permanently on.
-- *Roles & Permissions* — create roles, select which modules they can access, and a **Manage
-  Access** matrix for View/Edit/Delete per module (Dashboard and Activity Log only ever offer
-  View, since there's nothing on either to edit or delete). The **Admin** role always has full
-  access to every module regardless of what's configured, so you can't lock yourself out.
-- *Activity Log* — a filterable audit trail of every staff action (logins, creates, edits,
-  deletes, imports, status changes, password resets/changes) — never employee self-service
-  logins or activity. Entries older than 6 months are automatically cleaned up daily.
-- *Approvals* — see below.
-- *Approval Routing* — see below.
+- *Users* — staff accounts. Search by User ID / email and multi-select filters for **Role** and
+  **Establishment** (a user with all-establishment access, including Admin, always matches an
+  establishment filter). Email is optional. Each Admin-role account can be marked "Can approve".
+- *Roles & Permissions* — create roles, choose their modules, and set View / Edit / Delete per
+  module. The **Admin** role always has full access.
+- *Activity Log* — filterable audit trail of staff actions; entries older than 6 months are
+  cleaned up daily.
+- *Approvals* — see section 7. Search the inbox by the user who requested.
+- *Approval Routing* — see section 7.
 
 ## 5. Environment variables
 
@@ -136,7 +141,7 @@ to generate its slip at all) is done from Upload Salary Data.
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | MySQL connection |
 | `DB_CONNECTION_LIMIT` | Connection pool size (optional; sensible default applied if unset) |
 | `JWT_SECRET` | Secret used to sign login tokens — set a long random string |
-| `JWT_EXPIRES_IN` | Token lifetime (default `30m`) — every session is force-logged-out at this point, except while a bulk import is actively in progress for that account |
+| `JWT_EXPIRES_IN` | Maximum session length (default `90m`). Set `JWT_EXPIRES_IN=90m` in `.env` — a value already in `.env` overrides the default. Every session is signed out at this point, except while a bulk import is running. Separately, the app signs a user out after **5 minutes without activity** (fixed in `frontend/src/context/AuthContext.jsx`) |
 | `CORS_ORIGIN` | Comma-separated list of allowed frontend origins |
 | `ALLOWED_STAFF_IPS` | Restricts **staff** accounts to the company network — see [Restricting staff to the office network](#restricting-staff-to-the-office-network). Unset = no restriction |
 | `TRUST_PROXY` | Number of reverse proxies in front of the API (e.g. `1` for nginx). Leave unset if visitors connect directly. Needed for the network restriction to see real visitor addresses behind a proxy |
@@ -166,9 +171,10 @@ never guesses from the password, since a freshly-provisioned account on either s
 password to the ID itself and the two could easily be identical.
 
 Login is **case-sensitive** for both User ID and Employee ID (`HR1` and `hr1` are different
-accounts). Every session is force-logged-out after `JWT_EXPIRES_IN` (default 30 minutes) — except
-that a bulk Excel import already in progress for that account defers the logout until the import
-finishes, rather than interrupting it.
+accounts). A session ends after 5 minutes with no mouse, keyboard, scroll or touch activity, and in any case
+after `JWT_EXPIRES_IN` (default 90 minutes). The last-activity time is shared between browser tabs,
+so a tab reopened after being away longer than that is signed out. A bulk Excel import in
+progress defers the sign-out until it finishes.
 
 ### Restricting staff to the office network
 
@@ -193,6 +199,13 @@ What to put in the list depends on where the server runs:
 
 - **Server inside the office LAN, reached directly** — list the office's private range, e.g.
   `192.168.1.0/24` (check with `ipconfig` on an office PC). Leave `TRUST_PROXY` unset.
+- **Server on the office LAN that also has its own public address (for employees outside)** —
+  list only the office's private range, and have staff open the app at the server's **LAN**
+  address. Do **not** list the server's own public address: it identifies the server, not the
+  office. If staff will ever open the app through the public address from inside the office,
+  their traffic arrives from the office's *outgoing* public IP instead (search "what is my IP"
+  from an office PC — it is usually a different address from the server's) and that one would
+  need adding.
 - **Server hosted elsewhere (cloud/VPS), reached over the internet** — list the office's **public**
   IP (search "what is my IP" from an office PC). This must be a *static* IP: if your ISP changes it,
   every staff login is locked out until the list is updated and the server restarted. If the API
@@ -243,29 +256,95 @@ act on every request regardless of how it's routed.
 
 ## 8. Salary slip generation — nothing is ever stored on disk
 
-A slip's PDF is built fresh, in memory, at the exact moment someone previews or downloads it —
-individually, or one at a time while a bulk ZIP is being assembled — and is never written to disk
-or cached anywhere. There is no "missing slip," no regeneration step, and no retention/cleanup job
-for slip files, because there's nothing ever sitting on disk to go missing or need cleaning up.
+A slip's PDF is built fresh, in memory, at the moment someone previews or downloads it —
+individually, or one at a time while a ZIP is assembled — and is never written to disk. There is
+no "missing slip", regeneration step or cleanup job.
 
-**Historical accuracy is guaranteed by a snapshot taken once, at the moment a salary record is
-first created** (single add or bulk import) — freezing the employee's full name, relative's
-name/relation, designation, UAN, and bank account number, and the establishment's name, address,
-signatory name, and which logo/signature file was current, all at that exact moment. Editing that
-record's figures later, or re-importing it, never touches this snapshot. A later change to the
-employee's designation or the establishment's signature therefore has **no effect whatsoever** on
-any slip already covering an earlier period — a June slip permanently shows June's data, even if
-everything about that employee or establishment changes in August.
+**Which employee / establishment details a slip shows** comes from the effective-dated history in
+`employee_versions` and `establishment_versions`. Every save with an Effective-from date is kept
+exactly as saved (nothing older is edited). To build a slip, of the versions whose effective date
+is on or before the slip's date, the one **saved most recently** is used, so the latest change
+always wins:
+- **Monthly slip** — the slip's date is the last day of the pay month. A change effective 05-08
+  is not on the July slip and is on the August slip.
+- **Arrear slip** — the slip's date is its **date of issue**; the arrear period does not matter.
 
-The PDF itself follows the statutory **Form-XVI** wage slip layout (Occupational Safety, Health
-and Working Conditions Code, 2020), laid out on **A4 portrait** paper with two slips stacked per
-sheet (cut in half for two complete copies with no wasted paper — a single download simply leaves
-the second half blank), using **Carlito** (the free, metrically-compatible equivalent of Calibri)
-via `backend/src/assets/fonts/Carlito-*.ttf`, bundled with the project. Net pay is spelled out in
-words using the Indian numbering system (Lakh/Crore). **Date of issue** is always the 7th of the
-month immediately following the pay period (e.g. a January 2026 slip always shows 07-02-2026),
-regardless of when it's actually generated or regenerated — a fixed business date, not a
-processing timestamp.
+Changing details or an Effective-from date therefore shows on the very next preview / download.
 
-Downloads (single or via ZIP) are named `{Employee Name}_{Employee ID}_{Month-Year}.pdf`; a bulk
-ZIP groups files into one folder per establishment.
+The PDF follows the statutory **Form-XVI** wage slip layout (Occupational Safety, Health and
+Working Conditions Code, 2020) on **A4 portrait**. Two slips in one download are stacked on one
+sheet (cut in half for two copies); a single slip ends right after its "Computer-generated" line,
+with no blank half-page. Font: **Carlito** (`backend/src/assets/fonts/`). Net pay is written in
+words with the Indian system (Thousand / Lakh / Crore, including amounts of 100 crore and above).
+
+**Date of issue** — monthly slip: the 7th of the month after the pay month. Arrear slip: the date
+entered with the record. Arrear slips are titled "ARREAR WAGE / SALARY SLIP" and show their period.
+
+Downloads are named `{Employee Name}_{Employee ID}_{Month-Year}.pdf`; a ZIP groups files into one
+folder per establishment.
+
+## 9. Business rules
+
+**Dates**
+- No date may be before the employee's **Active from** date: effective-from, inactive date, date
+  of issue, and every salary / arrear month.
+- No date may be **after today**, and no pay or arrear month after the current month: Active from,
+  Inactive date, Effective from (employees and establishments) and an arrear's Date of issue. The
+  date pickers stop at today and the server enforces it, including for Excel uploads.
+- **Active from** cannot be moved later than any salary month, arrear period, arrear date of
+  issue or effective-from already saved for that employee; the same applies when an employee is
+  made Active again.
+- Salary and arrear months must fall inside the employee's active window (from the Active-from
+  month to the Inactive month).
+- An arrear's **Date of issue** must be after the arrear "to" month (on or after the 1st of the
+  following month).
+
+**Salary figures** (add, edit and import)
+- If Paid days is greater than 0, Basic must be greater than 0.
+- D.A., HRA and Conveyance Allowance must each be no greater than Basic.
+- Total deductions cannot exceed gross earnings (net pay is never negative).
+- Paid days cannot exceed the days in that month. Negative adjustment figures are allowed.
+
+**Employees**
+- Email is optional. App access needs the employee to be Active.
+- Re-activating requires a new Active-from date.
+
+## 10. Final changes in this release
+
+- **Slip details**: slips use the latest saved effective-dated change (monthly by pay month, arrear
+  by date of issue); older versions are never edited. Slips update immediately after a change.
+- **Employee Master**: App Access toggle (single and bulk) replaces the Status toggle; Active /
+  Inactive, inactive date, re-activation and Effective from are handled in Edit; Effective from
+  opens with the last saved date; no Effective-from field when adding.
+- **Dates**: not before Active from, not after today (see section 9); arrear date of issue must
+  follow the arrear period.
+- **Salary upload**: Basic must be above 0 when Paid days is above 0; arrear Excel export; the
+  same search, multi-select (kept across pages) and pagination on both tabs.
+- **Salary Slips**: Establishment → Employee → slips grouped view with per-establishment
+  pagination, collapsed by default (monthly and arrear); single-slip PDF has no blank half-page;
+  amount-in-words fixed for very large amounts.
+- **Users**: Role and Establishment multi-select filters; email optional.
+- **Approvals**: search by requested-by user; App-access changes follow the Edit routing rule.
+- **Dashboard**: new charts, totals under chart titles, 60-second refresh; larger axis labels.
+- **Layout**: hover-expand icon sidebar, user menu with Change password / Sign out at the top
+  right, a receipt-style icon for Salary Slips, and the word "staff" shown as "HR" in the UI.
+- **Sessions**: 5-minute inactivity sign-out; maximum session 90 minutes.
+
+## 11. Project layout
+
+```
+backend/
+  src/server.js            Express app, cron jobs (retention cleanup, approval expiry)
+  src/config/              db.js, schema.sql (complete schema), migration_*.sql, seed.js, migrate.js
+  src/routes/              auth, users, roles, employees, establishments, salaryData, arrearData,
+                           salarySlips, approvals, approvalRouting, dashboard, activityLog
+  src/utils/               employmentWindow.js (date rules), effectiveDating.js (versions),
+                           slipService.js + pdfGenerator.js (slips), approvalRouting.js, figureCheck.js
+  src/assets/fonts/        Carlito fonts used on slips
+  uploads/                 logos, signatures and staged Excel imports (not committed)
+frontend/
+  src/pages/               one file per screen
+  src/components/          shared pieces (Layout, Sidebar, UserMenu, pickers, ArrearUpload, ArrearSlips)
+  src/context/AuthContext  login state, 5-minute inactivity sign-out
+  src/styles/app.css       all styling
+```
