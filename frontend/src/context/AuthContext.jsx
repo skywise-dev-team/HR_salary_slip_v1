@@ -118,8 +118,13 @@ export function AuthProvider({ children }) {
   // longer than the limit is signed out too. The background /auth/me check
   // above does not count as activity. A running task (bulk import) holds the
   // logout off until it is finished.
+  // Depends on whether someone is signed in, NOT on the user object: the
+  // background /auth/me check replaces `user` with a new object every 15
+  // seconds, and re-running this effect on each of those used to reset the
+  // activity time, so the idle logout never came.
+  const loggedIn = !!user;
   useEffect(() => {
-    if (!user) return;
+    if (!loggedIn) return;
     const readLast = () => Number(localStorage.getItem(ACTIVITY_KEY)) || Date.now();
     if (Date.now() - readLast() > IDLE_LIMIT_MS && !isTaskActive()) { logout(); return; }
 
@@ -138,11 +143,21 @@ export function AuthProvider({ children }) {
       if (isTaskActive()) { markActive(); return; }
       if (Date.now() - readLast() > IDLE_LIMIT_MS) logout();
     }, 10000);
+    // Background tabs throttle timers, so also check the moment the tab is
+    // shown or focused again. This only checks; it does not count as activity.
+    const checkNow = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (!isTaskActive() && Date.now() - readLast() > IDLE_LIMIT_MS) logout();
+    };
+    document.addEventListener('visibilitychange', checkNow);
+    window.addEventListener('focus', checkNow);
     return () => {
       clearInterval(check);
+      document.removeEventListener('visibilitychange', checkNow);
+      window.removeEventListener('focus', checkNow);
       events.forEach((e) => window.removeEventListener(e, markActive));
     };
-  }, [user]);
+  }, [loggedIn]);
 
   // Immediate logout on an admin-side access change — e.g. an employee's
   // status or App Access is flipped off, a staff account is deactivated, or

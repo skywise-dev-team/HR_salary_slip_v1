@@ -26,7 +26,19 @@ function formatINR(amount) {
   return (n < 0 ? '-' : '') + g;
 }
 
-const rupees = (v) => `\u20B9${formatINR(v)}`;
+// Actual value with two decimals (Indian grouping), e.g. 8376.37 -> 8,376.37
+function formatINRExact(amount) {
+  const num = Number(amount) || 0;
+  const [whole, dec] = Math.abs(num).toFixed(2).split('.');
+  const last = whole.slice(-3);
+  const rest = whole.slice(0, -3);
+  const g = rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last : last;
+  return (num < 0 ? '-' : '') + g + '.' + dec;
+}
+
+// Every figure on the slip shows its actual value; only Net Wages is rounded
+const rupees = (v) => `\u20B9${formatINRExact(v)}`;
+const rupeesRounded = (v) => `\u20B9${formatINR(v)}`;
 
 const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
   'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
@@ -129,7 +141,7 @@ function drawImageCentered(doc, image, boxX, boxY, boxW, boxH) {
 // Returns the finished PDF as a Buffer — nothing here ever touches disk.
 // This is generated fresh every time it's called (a preview, a download,
 // one file inside a bulk ZIP) rather than saved anywhere, by design.
-async function generateSalarySlipPdf(record, secondRecord = null) {
+async function generateSalarySlipPdf(record, secondRecord = null, options = {}) {
   // Trim logo/signature images down to their real visible content BEFORE
   // any drawing happens — pdfkit's drawing calls below are synchronous, so
   // this async preprocessing has to finish first, with the resulting
@@ -174,9 +186,10 @@ async function generateSalarySlipPdf(record, secondRecord = null) {
       doc.moveTo(0, sliceH).lineTo(doc.page.width, sliceH).lineWidth(0.5).dash(3, { space: 2 }).stroke('#AAAAAA');
       doc.undash();
       drawSlip(doc, secondRecord, sliceH, sliceH);
-    } else if (doc.page.dictionary && doc.page.dictionary.data) {
-      // Single slip: end the page right after the footer instead of leaving
-      // the rest of the A4 sheet blank.
+    } else if (options.cropToContent && doc.page.dictionary && doc.page.dictionary.data) {
+      // On-screen preview only: end the page right after the footer so no blank
+      // space shows. Downloads keep the full A4 page (slip at the top-left) so
+      // printers do not centre a short page.
       const h = Math.min(doc.page.height, Math.ceil(endY + 8 * MM));
       doc.page.dictionary.data.MediaBox = [0, doc.page.height - h, doc.page.width, doc.page.height];
       doc.page.dictionary.data.CropBox = [0, doc.page.height - h, doc.page.width, doc.page.height];
@@ -411,7 +424,7 @@ function drawSlip(doc, record, originY, sliceH) {
     const h = rowHeights[8];
     doc.font('reg').fontSize(FS).text('9', col1X, rowY + h / 2 - VOFF, { width: col1W, align: 'center' });
     doc.font('bold').fontSize(FS).text('Net Wages / Salary amount paid', col2X + PAD, rowY + h / 2 - VOFF, { width: col2W - PAD * 2 });
-    doc.font('bold').fontSize(FS).text(rupees(record.net_pay), col3X + PAD, rowY + h / 2 - VOFF, { width: col3W - PAD * 2 });
+    doc.font('bold').fontSize(FS).text(rupeesRounded(record.net_pay), col3X + PAD, rowY + h / 2 - VOFF, { width: col3W - PAD * 2 });
     rowY += h;
     hLine(rowY);
   }

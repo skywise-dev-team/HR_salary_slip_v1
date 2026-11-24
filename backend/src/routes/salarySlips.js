@@ -125,7 +125,7 @@ router.get('/:id/preview', requirePermission('salary_slips', 'view'), async (req
     return res.status(403).json({ message: 'You can only view your own salary slips' });
   }
 
-  const buffer = await generateSlipBuffer(sd.id);
+  const buffer = await generateSlipBuffer(sd.id, undefined, { cropToContent: true });
   res.setHeader('Content-Disposition', 'inline');
   res.setHeader('Content-Type', 'application/pdf');
   res.send(buffer);
@@ -307,7 +307,7 @@ router.get('/arrear/:id/preview', requirePermission('salary_slips', 'view'), asy
   }
   const a = await loadArrearForRequest(req, res);
   if (!a) return;
-  const buffer = await generateArrearSlipBuffer(a.id);
+  const buffer = await generateArrearSlipBuffer(a.id, undefined, { cropToContent: true });
   res.setHeader('Content-Disposition', 'inline');
   res.setHeader('Content-Type', 'application/pdf');
   res.send(buffer);

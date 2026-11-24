@@ -120,9 +120,9 @@ async function buildSlipRecord(salaryDataId, db = pool) {
 // Generates one slip's PDF as a Buffer, fresh, right now — nothing here is
 // ever saved to disk. Called at the moment someone actually previews or
 // downloads a slip (single or as part of a bulk ZIP), not before.
-async function generateSlipBuffer(salaryDataId, db = pool) {
+async function generateSlipBuffer(salaryDataId, db = pool, options = {}) {
   const record = await buildSlipRecord(salaryDataId, db);
-  return generateSalarySlipPdf(record);
+  return generateSalarySlipPdf(record, null, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +169,9 @@ async function buildArrearSlipRecord(arrearId, db = pool) {
   };
 }
 
-async function generateArrearSlipBuffer(arrearId, db = pool) {
+async function generateArrearSlipBuffer(arrearId, db = pool, options = {}) {
   const record = await buildArrearSlipRecord(arrearId, db);
-  return generateSalarySlipPdf(record);
+  return generateSalarySlipPdf(record, null, options);
 }
 
 module.exports = { captureSlipSnapshot, buildSlipRecord, generateSlipBuffer, buildArrearSlipRecord, generateArrearSlipBuffer, LOGOS_DIR, SIGNATURES_DIR };
