@@ -379,7 +379,7 @@ function drawSlip(doc, record, originY, sliceH) {
       ['D.A.', rupees(record.da)],
       ['HRA', rupees(record.hra)],
       ['Conveyance Allowance', rupees(record.conveyance_allowance)],
-      ['Overtime', rupees(record.overtime)]
+      ['Holiday', rupees(record.overtime)]
     ];
     const deductions = [
       ['PF', rupees(record.pf_deduction)],
